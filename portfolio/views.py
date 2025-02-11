@@ -57,13 +57,41 @@ class updateportfolio(generics.RetrieveUpdateAPIView):
 
 class list_resume(generics.ListCreateAPIView):
     serializer_class = ResumeSerial
-    queryset = Resume.objects.all()
+    #queryset = Resume.objects.all()
     name = "List_resume"
+    def get_queryset(self):
+        url_arg = self.request.query_params.get("username" , None)
+
+        if url_arg:
+            print(url_arg)
+            print("i got here")
+            print(Resume.objects.all())
+            print(Resume.objects.filter(about__about__user__username = url_arg)
+)
+
+            return Resume.objects.filter(about__about__user__username = url_arg)
+
+        return Resume.objects.none()
 
 class update_resume(generics.RetrieveUpdateAPIView):
     serializer_class = ResumeSerial
     queryset = Resume.objects.all()
     name = "update_resume"
+   
+
+    def get_queryset(self):
+        url_arg = self.request.query_params.get("username" , None)
+
+        if url_arg:
+            print(url_arg)
+            print("i got here")
+            print(Resume.objects.all())
+            print(Resume.objects.filter(about__about__user__username = url_arg)
+)
+
+            return Resume.objects.filter(about__about__user__username = url_arg)
+
+        return Resume.objects.none()
 
 
 class api_root(generics.GenericAPIView):
@@ -76,5 +104,5 @@ class api_root(generics.GenericAPIView):
             List_portfolio.name : reverse("portfolio:"+List_portfolio.name , request=req),
             list_about.name :reverse("portfolio:"+list_about.name , request=req),
             list_resume.name : reverse("portfolio:"+list_resume.name , request=req),
-            
+
         })
