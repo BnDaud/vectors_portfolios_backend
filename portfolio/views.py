@@ -31,7 +31,7 @@ class ListCreateProfile(generics.ListCreateAPIView):
 
     def get_queryset(self):
         url_arg = self.request.query_params.get("username" ,None)
-        print(url_arg)
+        
         if url_arg:
             return Profile.objects.filter(user__username = url_arg)
         

@@ -30,7 +30,7 @@ ALLOWED_HOSTS = []
 
 
 # Application definition
-my_app = ["rest_framework" , "portfolio"]
+my_app = ["rest_framework" , "portfolio" ,  "corsheaders",]
 INSTALLED_APPS = [
     "django.contrib.admin",
     "django.contrib.auth",
@@ -41,6 +41,7 @@ INSTALLED_APPS = [
 ] + my_app
 
 MIDDLEWARE = [
+     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -69,6 +70,14 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = "portfolio_backend.wsgi.application"
+
+CORS_ALLOW_ALL_ORIGINS = True  # 👈 Allows any frontend to access the API (not recommended for production)
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:8000",
+
+]
+
+
 
 
 # Database
