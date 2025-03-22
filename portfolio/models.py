@@ -17,6 +17,8 @@ class About(models.Model):
     skill = models.CharField(blank=False , max_length=100)
     years_of_experience = models.IntegerField()
     education = models.CharField(max_length=200)
+    description = models.TextField(max_length=500 , default="")
+    image_link = models.URLField(default="" , blank=True) 
 
 
 
@@ -29,6 +31,7 @@ class Resume(models.Model):
     post = models.CharField(max_length=100)
     start_year = models.DateField(auto_now=False , auto_now_add=False)
     end_year = models.DateField(auto_now=False , auto_now_add=False)
+    company_name = models.CharField(max_length=50 , default="")
     
 
 class Portfolio(models.Model):

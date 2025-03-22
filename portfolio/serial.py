@@ -80,6 +80,8 @@ class AboutSerial(ModelSerializer):
         instance.skill = validated_data.get("skill" , instance.skill)
         instance.years_of_experience  = validated_data.get("years_of_experience" ,instance.years_of_experience)
         instance.education = validated_data.get("education" , instance.education)
+        instance.description = validated_data.get("description" , instance.description)
+        instance.image_link = validated_data.get("image_link" , instance.image_link)
         instance.save()
         return instance
     
