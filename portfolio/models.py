@@ -1,5 +1,7 @@
 from django.db import models
 from django.contrib.auth.models import User
+from django.core.validators import MinValueValidator, MaxValueValidator
+
 # Create your models here.
 
 
@@ -16,7 +18,7 @@ class About(models.Model):
     about = models.OneToOneField(Profile , on_delete=models.CASCADE , related_name="about" )
     skill = models.CharField(blank=False , max_length=100)
     years_of_experience = models.IntegerField()
-    education = models.CharField(max_length=200)
+    #education = models.CharField(max_length=200)# i will drop this column later
     description = models.TextField(max_length=500 , default="")
     image_link = models.URLField(default="" , blank=True) 
 
@@ -32,6 +34,23 @@ class Resume(models.Model):
     start_year = models.DateField(auto_now=False , auto_now_add=False)
     end_year = models.DateField(auto_now=False , auto_now_add=False)
     company_name = models.CharField(max_length=50 , default="")
+
+class School(models.Model):
+    about = models.ForeignKey(About , on_delete=models.CASCADE , related_name="school")
+    start_year = models.DateField(auto_now=False , auto_now_add=False)
+    end_year = models.DateField(auto_now=False , auto_now_add=False)
+    school_name = models.CharField(max_length=50 , default="")
+
+    class Meta:
+        verbose_name_plural = "Schools"
+
+class Profiency(models.Model):
+    about = models.ForeignKey(About , on_delete=models.CASCADE , related_name="profiency")
+    skill_name = models.CharField(max_length=50 , default="")
+    skill_range = models.SmallIntegerField(validators=[ MinValueValidator(0) , MaxValueValidator(100)] , default=10)
+
+    class Meta:
+        verbose_name_plural = "Profiency"
     
 
 class Portfolio(models.Model):

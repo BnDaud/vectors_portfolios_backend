@@ -2,7 +2,7 @@ from rest_framework.serializers import ModelSerializer  , HyperlinkedModelSerial
 from rest_framework.serializers import SlugRelatedField , HyperlinkedRelatedField
 from rest_framework.serializers import ChoiceField ,CharField ,SerializerMethodField
 from django.contrib.auth.models import User
-from .models import Profile , Portfolio , About , Resume
+from .models import Profile , Portfolio , About , Resume , School , Profiency
 
 
 class Userserial(ModelSerializer):
@@ -41,7 +41,15 @@ class Userserial(ModelSerializer):
 
 
 
+class ProfiencySerial(ModelSerializer):
+    _about = SerializerMethodField()
 
+    def get__about(self , obj):
+        return obj.about.about.user.username
+    
+    class Meta :
+        model = Profiency
+        fields = "__all__"
 
 class ResumeSerial(ModelSerializer):
     _about = SerializerMethodField()
@@ -54,10 +62,22 @@ class ResumeSerial(ModelSerializer):
         fields = "__all__"
 
 
+class SchoolSerial(ModelSerializer):
+    _about = SerializerMethodField()
+
+    def get__about(self , obj):
+        return obj.about.about.user.username
+    
+    class Meta :
+        model = School
+        fields = "__all__"
+
 
 class AboutSerial(ModelSerializer):
     about = CharField(required = True)
     resume = ResumeSerial(many = True , read_only = True)
+    school = SchoolSerial(many = True , read_only = True)
+    profiency = ProfiencySerial(many = True , read_only = True)
 
     def get_about(self , obj):
         return obj.about.user.username
@@ -79,7 +99,7 @@ class AboutSerial(ModelSerializer):
         instance.about = user
         instance.skill = validated_data.get("skill" , instance.skill)
         instance.years_of_experience  = validated_data.get("years_of_experience" ,instance.years_of_experience)
-        instance.education = validated_data.get("education" , instance.education)
+        #instance.education = validated_data.get("education" , instance.education)
         instance.description = validated_data.get("description" , instance.description)
         instance.image_link = validated_data.get("image_link" , instance.image_link)
         instance.save()

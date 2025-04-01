@@ -6,7 +6,7 @@ class display_profile(admin.ModelAdmin):
     list_display = ["user" , "display_pic"]
 
 class display_about(admin.ModelAdmin):
-    list_display =["about" , "skill" ,"years_of_experience" , "education"]
+    list_display =["about" , "skill" ,"years_of_experience" ,]
 
 
 class display_portfolio(admin.ModelAdmin):

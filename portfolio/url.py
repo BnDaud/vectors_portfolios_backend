@@ -1,6 +1,6 @@
 from django.urls import path, re_path
 from .views import ListCreateProfile , api_root , list_about , Userdetail ,updateUserdetail , UpdateProfile
-from .views import List_portfolio ,list_about ,UpdateAbout , updateportfolio , list_resume , update_resume
+from .views import List_portfolio ,list_about ,UpdateAbout , updateportfolio , list_resume , update_resume , list_school , update_school , list_proficency , update_profiency
 
 app_name = "portfolio"
 
@@ -57,5 +57,20 @@ urlpatterns = [
 
     path("resume/" , view=list_resume.as_view() , name=list_resume.name),
     path("resume/<int:pk>" , view=update_resume.as_view() , name=update_resume.name),
+    
+    #school/ returns all user school in the DB 
+    #school/?username=apple returns school related to the user called apple
+    # schoo/<int:pk> returns a specific school from the DB and could be updated
+
+    path("school/" , view=list_school.as_view() , name=list_school.name),
+    path("school/<int:pk>" , view=update_school.as_view() , name=update_school.name),
+    
+    #proficency/ returns all user proficency in the DB 
+    #proficency/?username=apple returns proficencyrelated to the user called apple
+    # proficency/<int:pk> returns a specific proficency from the DB and could be updated
+
+    path("profiency/" , view=list_proficency.as_view() , name=list_proficency.name),
+    path("profiency/<int:pk>" , view=update_profiency.as_view() , name=update_profiency.name),
+     
      
 ]

@@ -1,9 +1,9 @@
 from django.shortcuts import render
 from rest_framework.reverse import reverse
 from rest_framework import generics
-from .models import Profile , Portfolio , About ,Resume
+from .models import Profile , Portfolio , About ,Resume ,School ,Profiency
 from rest_framework.response import Response
-from . serial import Profileserial ,Userserial , PortfolioSerial ,AboutSerial ,ResumeSerial
+from . serial import Profileserial ,Userserial , PortfolioSerial ,AboutSerial ,ResumeSerial , SchoolSerial ,ProfiencySerial
 from django.contrib.auth.models import User
 
 # Create your views here.
@@ -105,7 +105,59 @@ class update_resume(generics.RetrieveUpdateAPIView):
     queryset = Resume.objects.all()
     name = "update_resume"
    
+class list_school(generics.ListCreateAPIView):
 
+    """ This Class List all the school availble 
+    if username arg is not passed with the url
+    it will return all the available school but if passed
+    it will return only the school of the username"""
+    serializer_class = SchoolSerial
+    
+    name = "List_school"
+    
+    def get_queryset(self):
+        url_arg = self.request.query_params.get("username" , None)
+
+        if url_arg:
+        
+            return School.objects.filter(about__about__user__username = url_arg)
+
+        return School.objects.all()
+
+class update_school(generics.RetrieveUpdateAPIView):
+    """
+    this Class is responsible to update a single school at a given time
+     and this could only be called with its Id"""
+    serializer_class = SchoolSerial
+    queryset = School.objects.all()
+    name = "list_school"
+
+class list_proficency(generics.ListCreateAPIView):
+
+    """ This Class List all the proficency availble 
+    if username arg is not passed with the url
+    it will return all the available school but if passed
+    it will return only the proficency of the username"""
+    serializer_class = ProfiencySerial
+    
+    name = "List_proficency"
+    
+    def get_queryset(self):
+        url_arg = self.request.query_params.get("username" , None)
+
+        if url_arg:
+        
+            return Profiency.objects.filter(about__about__user__username = url_arg)
+
+        return Profiency.objects.all()
+
+class update_profiency(generics.RetrieveUpdateAPIView):
+    """
+    this Class is responsible to update a single school at a given time
+     and this could only be called with its Id"""
+    serializer_class = ProfiencySerial
+    queryset = Profiency.objects.all()
+    name = "update_proficiency"
     
 
 
@@ -122,6 +174,13 @@ class api_root(generics.GenericAPIView):
             Userdetail.name : reverse("portfolio:"+Userdetail.name , request= req),
             List_portfolio.name : reverse("portfolio:"+List_portfolio.name , request=req),
             list_about.name :reverse("portfolio:"+list_about.name , request=req),
+            list_school.name : reverse("portfolio:"+list_school.name , request=req), 
+            list_proficency.name : reverse("portfolio:"+list_proficency.name , request=req),       
             list_resume.name : reverse("portfolio:"+list_resume.name , request=req),
 
         })
+    
+    
+
+
+   
