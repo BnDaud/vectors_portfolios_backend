@@ -54,14 +54,73 @@ class Profiency(models.Model):
     
 
 class Portfolio(models.Model):
-    class portfoiio_choice(models.TextChoices):
-        Frontend = "FE" , "Front End"
-        Backend = "BE" , "Back End"
-        data_analysis = "DA" ,"Data Analyst"
-        Robotics = "RB","Robotics"
+    
+
+    class portfolio_choice(models.TextChoices):
+        WebDev = "WebDev", "WebDev"
+        DataScience = "DataScience", "DataScience"
+        AI = "AI", "AI"
+        MachineLearning = "MachineLearning", "MachineLearning"
+        ComputerVision = "ComputerVision", "ComputerVision"
+        NLP = "NLP", "NLP"
+        Cybersecurity = "Cybersecurity", "Cybersecurity"
+        UIUX = "UIUX", "UIUX"
+        ProductManagement = "ProductManagement", "ProductManagement"
+        CloudComputing = "CloudComputing", "CloudComputing"
+        Robotics = "Robotics", "Robotics"
+        IoT = "IoT", "IoT"
+        BigData = "BigData", "BigData"
+        Blockchain = "Blockchain", "Blockchain"
+        MobileDev = "MobileDev", "MobileDev"
+        QA = "QA", "QA"
+        SoftwareEng = "SoftwareEng", "SoftwareEng"
+        DataAnalysis = "DataAnalysis", "DataAnalysis"
+        DatabaseAdmin = "DatabaseAdmin", "DatabaseAdmin"
+        NetworkEng = "NetworkEng", "NetworkEng"
+
+        Marketing = "Marketing", "Marketing"
+        DigitalMarketing = "DigitalMarketing", "DigitalMarketing"
+        SocialMedia = "SocialMedia", "SocialMedia"
+        ContentMarketing = "ContentMarketing", "ContentMarketing"
+        Sales = "Sales", "Sales"
+        PublicRelations = "PublicRelations", "PublicRelations"
+        Advertising = "Advertising", "Advertising"
+        BrandManagement = "BrandManagement", "BrandManagement"
+        ProductMarketing = "ProductMarketing", "ProductMarketing"
+        AgriMarketing = "AgriMarketing", "AgriMarketing"
+
+        HumanResources = "HumanResources", "HumanResources"
+        Finance = "Finance", "Finance"
+        Accounting = "Accounting", "Accounting"
+        Banking = "Banking", "Banking"
+        InvestmentBanking = "InvestmentBanking", "InvestmentBanking"
+        RealEstate = "RealEstate", "RealEstate"
+        Legal = "Legal", "Legal"
+        Education = "Education", "Education"
+        Teaching = "Teaching", "Teaching"
+        Research = "Research", "Research"
+
+        Catering = "Catering", "Catering"
+        Hospitality = "Hospitality", "Hospitality"
+        EventManagement = "EventManagement", "EventManagement"
+        Fashion = "Fashion", "Fashion"
+        Architecture = "Architecture", "Architecture"
+        InteriorDesign = "InteriorDesign", "InteriorDesign"
+        Medical = "Medical", "Medical"
+        Pharmacy = "Pharmacy", "Pharmacy"
+        Sports = "Sports", "Sports"
+        Entrepreneurship = "Entrepreneurship", "Entrepreneurship"
+        Agriculture = "Agriculture", "Agriculture"
+        Others = "Others", "Others"
+
+
 
     portfolio = models.ForeignKey(Profile , on_delete=models.CASCADE , related_name="portfolio")
-    category = models.CharField(choices = portfoiio_choice , max_length= 50)
+    category = models.CharField(choices = portfolio_choice , max_length= 50)
+    name = models.CharField(blank=False , max_length=50 , default="")
+    thumbnail = models.URLField(blank=False , default= "")
+    project_link = models.URLField(blank=False , default="")
+
 
 
     def __str__(self):

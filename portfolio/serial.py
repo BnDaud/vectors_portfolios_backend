@@ -109,7 +109,7 @@ class AboutSerial(ModelSerializer):
 
 
 class PortfolioSerial(ModelSerializer):
-    category = ChoiceField(choices=Portfolio.portfoiio_choice)
+    category = ChoiceField(choices=Portfolio.portfolio_choice)
   
     display_username = SerializerMethodField(read_only = True)
     username = CharField(required  = True  , write_only = True)
@@ -119,7 +119,7 @@ class PortfolioSerial(ModelSerializer):
         
     class Meta:
         model = Portfolio
-        fields = ["id", "category" , "display_username" , "username"]
+        fields = ["id", "category" , "display_username" , "username" , "name" , "thumbnail" , "project_link"]
     
     def create(self, validated_data):
         
