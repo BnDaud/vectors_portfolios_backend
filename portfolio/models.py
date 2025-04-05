@@ -7,6 +7,15 @@ from django.core.validators import MinValueValidator, MaxValueValidator
 
 class Profile(models.Model):
     user = models.OneToOneField(User , on_delete=models.CASCADE)
+    linkedin = models.URLField(default="" , blank=True)
+    github = models.URLField(default="" , blank=True)
+    whatapp = models.URLField(default="" , blank=True)
+    facebook = models.URLField(default="" , blank=True)
+    twitter = models.URLField(default="" , blank=True)
+    email = models.CharField(default="" , blank=True , max_length=50)
+    phone_number = models.CharField(default="" , blank=True , max_length=50)
+   
+    
     display_pic = models.ImageField(blank=False , upload_to= "images")
 
     def __str__(self):
@@ -125,3 +134,10 @@ class Portfolio(models.Model):
 
     def __str__(self):
         return self.portfolio.user.username + " Portfolio"
+
+
+
+
+
+
+

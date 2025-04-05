@@ -141,21 +141,28 @@ class Profileserial(ModelSerializer):
   
     class Meta:
         model = Profile
-        fields = ["user" , "display_pic" , "about" , "portfolio" ]
+        fields = ["user" , "display_pic" ,"github" , "linkedin" , "whatapp" ,"facebook" ,"email","phone_number","about" , "portfolio" ]
 
     def create(self , validated_data):
-        img = validated_data.pop("display_pic")
+        #img = validated_data.pop("display_pic")
+       
         password = validated_data["user"].pop("password")
+        validated_user = validated_data.pop("user")
 
-        user = User.objects.create(**validated_data["user"])
+        user = User.objects.create(**validated_user)
         user.set_password(password)
         user.save()
-        profile = Profile.objects.create(user = user , display_pic = img)
+        profile = Profile.objects.create(user = user , **validated_data)
     
         return profile
     
+    
+
+    
     def update(self, instance, validated_data):
+
       
+        
         display_pic = validated_data.pop("display_pic" , instance.display_pic)
        
         new_user_detail = validated_data.pop("user"  , instance.user)
@@ -171,10 +178,20 @@ class Profileserial(ModelSerializer):
         user.save()
         
         instance.display_pic = display_pic
+        instance.phone_number = validated_data.get("phone_number" , instance.phone_number)
+        instance.linkedin = validated_data.get("linkedin" , instance.linkedin)
+        instance.whatapp = validated_data.get("whatapp" , instance.whatapp)
+        instance.twitter = validated_data.get("twitter", instance.twitter)
+        instance.github = validated_data.get("github" , instance.github)
+        instance.facebook = validated_data.get("facebook" , instance.facebook)
+        instance.email = validated_data.get("email" , instance.email)
         
-        instance.user = user
+        #instance.user = user
+
+        instance.save()
 
         return instance
+        
 
         
 

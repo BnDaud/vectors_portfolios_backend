@@ -3,7 +3,7 @@ from .models import Profile , Portfolio , About , Resume
 # Register your models here.
 
 class display_profile(admin.ModelAdmin):
-    list_display = ["user" , "display_pic"]
+    list_display = ["user" , "display_pic" , "github" , "linkedin" , "whatapp" ,"facebook" , "email" , "phone_number"]
 
 class display_about(admin.ModelAdmin):
     list_display =["about" , "skill" ,"years_of_experience" ,]
