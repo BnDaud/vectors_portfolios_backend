@@ -141,7 +141,7 @@ class Profileserial(ModelSerializer):
   
     class Meta:
         model = Profile
-        fields = ["user" , "display_pic" ,"github" , "linkedin" , "whatapp" ,"facebook" ,"email","phone_number","about" , "portfolio" ]
+        fields = ["user" , "display_pic" ,"github" , "linkedin" , "whatapp" ,"facebook" ,"email","twitter","phone_number","about" , "portfolio" ]
 
     def create(self , validated_data):
         #img = validated_data.pop("display_pic")
