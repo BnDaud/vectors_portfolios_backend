@@ -134,9 +134,9 @@ class update_school(generics.RetrieveUpdateAPIView):
 
 class list_proficency(generics.ListCreateAPIView):
 
-    """ This Class List all the proficency availble 
+    """ This Class List all the proficency available 
     if username arg is not passed with the url
-    it will return all the available school but if passed
+    it will return all the available proficiency but if passed
     it will return only the proficency of the username"""
     serializer_class = ProfiencySerial
     

@@ -16,7 +16,7 @@ class Profile(models.Model):
     phone_number = models.CharField(default="" , blank=True , max_length=50)
    
     
-    display_pic = models.ImageField(blank=False , upload_to= "images")
+    display_pic = models.URLField(default="" , blank=False)
 
     def __str__(self):
         return self.user.username

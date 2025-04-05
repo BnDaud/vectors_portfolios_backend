@@ -66,7 +66,7 @@ urlpatterns = [
     path("school/<int:pk>" , view=update_school.as_view() , name=update_school.name),
     
     #proficency/ returns all user proficency in the DB 
-    #proficency/?username=apple returns proficencyrelated to the user called apple
+    #proficency/?username=apple returns proficency related to the user called apple
     # proficency/<int:pk> returns a specific proficency from the DB and could be updated
 
     path("profiency/" , view=list_proficency.as_view() , name=list_proficency.name),
