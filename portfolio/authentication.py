@@ -1,6 +1,7 @@
 from rest_framework import exceptions
 from rest_framework.authentication import CSRFCheck
 from rest_framework_simplejwt.authentication import JWTAuthentication
+from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 
 
 def _enforce_csrf(request):
@@ -33,6 +34,15 @@ class CookieJWTAuthentication(JWTAuthentication):
         if raw_token is None:
             return None
 
-        validated_token = self.get_validated_token(raw_token)
+        # An expired/invalid access token is the expected, frequent case
+        # this cookie-based flow relies on the refresh endpoint for - treat
+        # it as "not authenticated" rather than a hard failure, so a client
+        # can still reach /auth/refresh (which itself goes through this
+        # same authenticator) to get a new one.
+        try:
+            validated_token = self.get_validated_token(raw_token)
+        except (InvalidToken, TokenError):
+            return None
+
         _enforce_csrf(request)
         return self.get_user(validated_token), validated_token

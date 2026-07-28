@@ -79,6 +79,11 @@ CORS_ALLOW_ALL_ORIGINS = config("CORS_ALLOW_ALL_ORIGINS", default=False, cast=bo
 CORS_ALLOWED_ORIGINS = config("CORS_ALLOWED_ORIGINS", default="http://localhost:5173", cast=Csv())
 CORS_ALLOW_CREDENTIALS = True
 
+# Django's CSRF check validates the request's Origin header against this
+# list for any unsafe cross-origin request - separate from CORS_ALLOWED_ORIGINS,
+# which only governs whether the browser lets JS read the response.
+CSRF_TRUSTED_ORIGINS = config("CSRF_TRUSTED_ORIGINS", default="http://localhost:3000", cast=Csv())
+
 # httpOnly auth cookie flags - Lax/insecure for local http dev, None/secure
 # in production where frontend and backend are different domains.
 COOKIE_SECURE = config("COOKIE_SECURE", default=False, cast=bool)
