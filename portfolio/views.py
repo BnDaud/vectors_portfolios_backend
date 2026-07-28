@@ -38,7 +38,7 @@ class ListCreateProfile(generics.ListCreateAPIView):
 
         return Profile.objects.all()
 
-class UpdateProfile(generics.RetrieveUpdateAPIView):
+class UpdateProfile(generics.RetrieveUpdateDestroyAPIView):
     """ this function helps to to Update new user profile"""
     name = "update_profiles"
     queryset = Profile.objects.all()
@@ -74,7 +74,7 @@ class list_about (generics.ListCreateAPIView):
     serializer_class = AboutSerial
 
 
-class UpdateAbout(generics.RetrieveUpdateAPIView):
+class UpdateAbout(generics.RetrieveUpdateDestroyAPIView):
     """
     This class is to update about any user and can be access with it Id"""
     name = "update_about"
@@ -89,7 +89,7 @@ class List_portfolio(generics.ListCreateAPIView):
     name = "List_Portfolio"
 
 
-class updateportfolio(generics.RetrieveUpdateAPIView):
+class updateportfolio(generics.RetrieveUpdateDestroyAPIView):
     """ this class is responsible to update any portfolio at a given time
      and can be access with its Id """
     serializer_class = PortfolioSerial
@@ -116,7 +116,7 @@ class list_resume(generics.ListCreateAPIView):
 
         return Resume.objects.all()
 
-class update_resume(generics.RetrieveUpdateAPIView):
+class update_resume(generics.RetrieveUpdateDestroyAPIView):
     """
     this Class is responsible to update a single resume at a given time
      and this could only be called with its Id"""
@@ -143,7 +143,7 @@ class list_school(generics.ListCreateAPIView):
 
         return School.objects.all()
 
-class update_school(generics.RetrieveUpdateAPIView):
+class update_school(generics.RetrieveUpdateDestroyAPIView):
     """
     this Class is responsible to update a single school at a given time
      and this could only be called with its Id"""
@@ -170,7 +170,7 @@ class list_proficiency(generics.ListCreateAPIView):
 
         return Proficiency.objects.all()
 
-class update_proficiency(generics.RetrieveUpdateAPIView):
+class update_proficiency(generics.RetrieveUpdateDestroyAPIView):
     """
     this Class is responsible to update a single school at a given time
      and this could only be called with its Id"""

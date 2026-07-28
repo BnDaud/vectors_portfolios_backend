@@ -2,6 +2,7 @@ from django.urls import path, re_path
 from .views import ListCreateProfile , api_root , list_about , Userdetail ,updateUserdetail , UpdateProfile
 from .views import List_portfolio ,list_about ,UpdateAbout , updateportfolio , list_resume , update_resume , list_school , update_school , list_proficiency , update_proficiency
 from .views import list_tracks , update_track , list_goals , update_goal , complete_goal
+from .auth_views import CsrfPrimeView , LoginView , LogoutView , RefreshView , MeView
 
 app_name = "portfolio"
 
@@ -90,5 +91,16 @@ urlpatterns = [
     path("goals/<int:pk>" , view=update_goal.as_view() , name=update_goal.name),
     path("goals/<int:pk>/complete" , view=complete_goal.as_view() , name=complete_goal.name),
 
+    #auth/csrf primes the csrftoken cookie, returns its value in the body
+    #auth/login sets access_token+refresh_token httpOnly cookies
+    #auth/logout clears both cookies
+    #auth/refresh reissues access_token from refresh_token cookie
+    #auth/me reports whether the current request is authenticated
+
+    path("auth/csrf" , view=CsrfPrimeView.as_view() , name=CsrfPrimeView.name),
+    path("auth/login" , view=LoginView.as_view() , name=LoginView.name),
+    path("auth/logout" , view=LogoutView.as_view() , name=LogoutView.name),
+    path("auth/refresh" , view=RefreshView.as_view() , name=RefreshView.name),
+    path("auth/me" , view=MeView.as_view() , name=MeView.name),
 
 ]

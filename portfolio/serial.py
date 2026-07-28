@@ -177,7 +177,7 @@ class Profileserial(ModelSerializer):
 
     class Meta:
         model = Profile
-        fields = ["user" , "display_pic" ,"github" , "linkedin" , "whatapp" ,"facebook" ,"email","twitter","phone_number","tracks" ]
+        fields = ["id" , "user" , "display_pic" ,"github" , "linkedin" , "whatapp" ,"facebook" ,"email","twitter","phone_number","tracks" ]
 
     def create(self , validated_data):
         #img = validated_data.pop("display_pic")
@@ -197,21 +197,18 @@ class Profileserial(ModelSerializer):
 
     def update(self, instance, validated_data):
 
-
-
         display_pic = validated_data.pop("display_pic" , instance.display_pic)
 
-        new_user_detail = validated_data.pop("user"  , instance.user)
+        new_user_detail = validated_data.pop("user" , None)
 
-        password = new_user_detail.pop("password" , None) #None means the password remains the same
-
-        new_user_detail["username"] = instance.user.username
-
-        user =  User.objects.get(**new_user_detail)
-
-        user.set_password(password)
-
-        user.save()
+        if new_user_detail is not None:
+            user = instance.user
+            password = new_user_detail.pop("password" , None)
+            for field , value in new_user_detail.items():
+                setattr(user , field , value)
+            if password:
+                user.set_password(password)
+            user.save()
 
         instance.display_pic = display_pic
         instance.phone_number = validated_data.get("phone_number" , instance.phone_number)

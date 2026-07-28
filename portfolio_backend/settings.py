@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/5.1/ref/settings/
 """
 
 from pathlib import Path
+from datetime import timedelta
 import os
 import dj_database_url
 from decouple import config, Csv
@@ -76,6 +77,26 @@ WSGI_APPLICATION = "portfolio_backend.wsgi.application"
 
 CORS_ALLOW_ALL_ORIGINS = config("CORS_ALLOW_ALL_ORIGINS", default=False, cast=bool)
 CORS_ALLOWED_ORIGINS = config("CORS_ALLOWED_ORIGINS", default="http://localhost:5173", cast=Csv())
+CORS_ALLOW_CREDENTIALS = True
+
+# httpOnly auth cookie flags - Lax/insecure for local http dev, None/secure
+# in production where frontend and backend are different domains.
+COOKIE_SECURE = config("COOKIE_SECURE", default=False, cast=bool)
+COOKIE_SAMESITE = config("COOKIE_SAMESITE", default="Lax")
+
+REST_FRAMEWORK = {
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "portfolio.authentication.CookieJWTAuthentication",
+    ],
+    "DEFAULT_PERMISSION_CLASSES": [
+        "rest_framework.permissions.IsAuthenticatedOrReadOnly",
+    ],
+}
+
+SIMPLE_JWT = {
+    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=30),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
+}
 
 
 # Database
