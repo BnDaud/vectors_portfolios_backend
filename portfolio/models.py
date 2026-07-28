@@ -1,3 +1,4 @@
+from datetime import date
 from django.db import models
 from django.contrib.auth.models import User
 from django.core.validators import MinValueValidator, MaxValueValidator
@@ -43,12 +44,16 @@ class PortfolioTrack(models.Model):
 class About(models.Model):
     track = models.OneToOneField(PortfolioTrack , on_delete=models.CASCADE , related_name="about" )
     skill = models.CharField(blank=False , max_length=100)
-    years_of_experience = models.IntegerField()
+    experience_since = models.DateField(null=True , blank=True)
     #education = models.CharField(max_length=200)# i will drop this column later
     description = models.TextField(max_length=500 , default="")
     image_link = models.URLField(default="" , blank=True)
 
-
+    @property
+    def years_of_experience(self):
+        if not self.experience_since:
+            return 0
+        return max(0 , (date.today() - self.experience_since).days // 365)
 
     def __str__(self):
         return "About " + self.track.profile.user.username

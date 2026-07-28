@@ -80,6 +80,10 @@ class AboutSerial(ModelSerializer):
     resume = ResumeSerial(many = True , read_only = True)
     school = SchoolSerial(many = True , read_only = True)
     proficiency = ProficiencySerial(many = True , read_only = True)
+    years_of_experience = SerializerMethodField()
+
+    def get_years_of_experience(self , obj):
+        return obj.years_of_experience
 
     class Meta:
         model = About
@@ -130,7 +134,7 @@ class PortfolioTrackSerial(ModelSerializer):
             new_about = About.objects.create(
                 track = track,
                 skill = source_about.skill,
-                years_of_experience = source_about.years_of_experience,
+                experience_since = source_about.experience_since,
                 description = source_about.description,
                 image_link = source_about.image_link,
             )
@@ -149,7 +153,7 @@ class PortfolioTrackSerial(ModelSerializer):
                     Portfolio.objects.create(track = track , category = item.category , name = item.name ,
                                               thumbnail = item.thumbnail , project_link = item.project_link)
         else:
-            About.objects.create(track = track , skill = "" , years_of_experience = 0 , description = "" , image_link = "")
+            About.objects.create(track = track , skill = "" , description = "" , image_link = "")
 
         return track
 
