@@ -1,6 +1,7 @@
 from django.urls import path, re_path
 from .views import ListCreateProfile , api_root , list_about , Userdetail ,updateUserdetail , UpdateProfile
 from .views import List_portfolio ,list_about ,UpdateAbout , updateportfolio , list_resume , update_resume , list_school , update_school , list_proficiency , update_proficiency
+from .views import list_tracks , update_track , list_goals , update_goal , complete_goal
 
 app_name = "portfolio"
 
@@ -71,6 +72,23 @@ urlpatterns = [
 
     path("proficiency/" , view=list_proficiency.as_view() , name=list_proficiency.name),
     path("proficiency/<int:pk>" , view=update_proficiency.as_view() , name=update_proficiency.name),
-     
-     
+
+    #tracks/ returns all portfolio tracks in the DB
+    #tracks/?username=apple returns tracks belonging to the user called apple
+    #tracks/<int:pk> returns a specific track and could be updated
+    #POST supports optional copy_from=<track_id> and copy_portfolio_items=true to clone content from an existing track
+
+    path("tracks/" , view=list_tracks.as_view() , name=list_tracks.name),
+    path("tracks/<int:pk>" , view=update_track.as_view() , name=update_track.name),
+
+    #goals/ returns all goals in the DB
+    #goals/?username=apple returns goals belonging to the user called apple
+    #goals/<int:pk> returns a specific goal and could be updated
+    #goals/<int:pk>/complete marks a goal completed and creates the chosen entry type under the selected tracks
+
+    path("goals/" , view=list_goals.as_view() , name=list_goals.name),
+    path("goals/<int:pk>" , view=update_goal.as_view() , name=update_goal.name),
+    path("goals/<int:pk>/complete" , view=complete_goal.as_view() , name=complete_goal.name),
+
+
 ]
