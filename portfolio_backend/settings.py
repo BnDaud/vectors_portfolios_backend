@@ -89,6 +89,13 @@ CSRF_TRUSTED_ORIGINS = config("CSRF_TRUSTED_ORIGINS", default="http://localhost:
 COOKIE_SECURE = config("COOKIE_SECURE", default=False, cast=bool)
 COOKIE_SAMESITE = config("COOKIE_SAMESITE", default="Lax")
 
+# Django's own csrftoken cookie is governed by separate settings from the
+# custom access/refresh cookies above - without these, the csrftoken cookie
+# stays SameSite=Lax by default and the browser won't send it back on a
+# cross-domain write, so CSRF validation fails even with a correct header.
+CSRF_COOKIE_SECURE = COOKIE_SECURE
+CSRF_COOKIE_SAMESITE = COOKIE_SAMESITE
+
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
         "portfolio.authentication.CookieJWTAuthentication",
