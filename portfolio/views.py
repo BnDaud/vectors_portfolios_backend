@@ -59,8 +59,8 @@ class list_tracks(generics.ListCreateAPIView):
         return PortfolioTrack.objects.all()
 
 
-class update_track(generics.RetrieveUpdateAPIView):
-    """ this class is responsible to update a single track at a given time """
+class update_track(generics.RetrieveUpdateDestroyAPIView):
+    """ this class is responsible to update or delete a single track at a given time """
     serializer_class = PortfolioTrackSerial
     queryset = PortfolioTrack.objects.all()
     name = "update_track"
