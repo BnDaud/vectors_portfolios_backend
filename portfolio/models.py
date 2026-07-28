@@ -53,13 +53,13 @@ class School(models.Model):
     class Meta:
         verbose_name_plural = "Schools"
 
-class Profiency(models.Model):
-    about = models.ForeignKey(About , on_delete=models.CASCADE , related_name="profiency")
+class Proficiency(models.Model):
+    about = models.ForeignKey(About , on_delete=models.CASCADE , related_name="proficiency")
     skill_name = models.CharField(max_length=50 , default="")
     skill_range = models.SmallIntegerField(validators=[ MinValueValidator(0) , MaxValueValidator(100)] , default=10)
 
     class Meta:
-        verbose_name_plural = "Profiency"
+        verbose_name_plural = "Proficiency"
     
 
 class Portfolio(models.Model):

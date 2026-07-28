@@ -2,7 +2,7 @@ from rest_framework.serializers import ModelSerializer  , HyperlinkedModelSerial
 from rest_framework.serializers import SlugRelatedField , HyperlinkedRelatedField
 from rest_framework.serializers import ChoiceField ,CharField ,SerializerMethodField
 from django.contrib.auth.models import User
-from .models import Profile , Portfolio , About , Resume , School , Profiency
+from .models import Profile , Portfolio , About , Resume , School , Proficiency
 
 
 class Userserial(ModelSerializer):
@@ -41,14 +41,14 @@ class Userserial(ModelSerializer):
 
 
 
-class ProfiencySerial(ModelSerializer):
+class ProficiencySerial(ModelSerializer):
     _about = SerializerMethodField()
 
     def get__about(self , obj):
         return obj.about.about.user.username
-    
+
     class Meta :
-        model = Profiency
+        model = Proficiency
         fields = "__all__"
 
 class ResumeSerial(ModelSerializer):
@@ -77,7 +77,7 @@ class AboutSerial(ModelSerializer):
     about = CharField(required = True)
     resume = ResumeSerial(many = True , read_only = True)
     school = SchoolSerial(many = True , read_only = True)
-    profiency = ProfiencySerial(many = True , read_only = True)
+    proficiency = ProficiencySerial(many = True , read_only = True)
 
     def get_about(self , obj):
         return obj.about.user.username

@@ -1,6 +1,6 @@
 from django.urls import path, re_path
 from .views import ListCreateProfile , api_root , list_about , Userdetail ,updateUserdetail , UpdateProfile
-from .views import List_portfolio ,list_about ,UpdateAbout , updateportfolio , list_resume , update_resume , list_school , update_school , list_proficency , update_profiency
+from .views import List_portfolio ,list_about ,UpdateAbout , updateportfolio , list_resume , update_resume , list_school , update_school , list_proficiency , update_proficiency
 
 app_name = "portfolio"
 
@@ -65,12 +65,12 @@ urlpatterns = [
     path("school/" , view=list_school.as_view() , name=list_school.name),
     path("school/<int:pk>" , view=update_school.as_view() , name=update_school.name),
     
-    #proficency/ returns all user proficency in the DB 
-    #proficency/?username=apple returns proficency related to the user called apple
-    # proficency/<int:pk> returns a specific proficency from the DB and could be updated
+    #proficiency/ returns all user proficiency in the DB
+    #proficiency/?username=apple returns proficiency related to the user called apple
+    # proficiency/<int:pk> returns a specific proficiency from the DB and could be updated
 
-    path("profiency/" , view=list_proficency.as_view() , name=list_proficency.name),
-    path("profiency/<int:pk>" , view=update_profiency.as_view() , name=update_profiency.name),
+    path("proficiency/" , view=list_proficiency.as_view() , name=list_proficiency.name),
+    path("proficiency/<int:pk>" , view=update_proficiency.as_view() , name=update_proficiency.name),
      
      
 ]

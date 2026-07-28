@@ -1,9 +1,9 @@
 from django.shortcuts import render
 from rest_framework.reverse import reverse
 from rest_framework import generics
-from .models import Profile , Portfolio , About ,Resume ,School ,Profiency
+from .models import Profile , Portfolio , About ,Resume ,School ,Proficiency
 from rest_framework.response import Response
-from . serial import Profileserial ,Userserial , PortfolioSerial ,AboutSerial ,ResumeSerial , SchoolSerial ,ProfiencySerial
+from . serial import Profileserial ,Userserial , PortfolioSerial ,AboutSerial ,ResumeSerial , SchoolSerial ,ProficiencySerial
 from django.contrib.auth.models import User
 
 # Create your views here.
@@ -132,31 +132,31 @@ class update_school(generics.RetrieveUpdateAPIView):
     queryset = School.objects.all()
     name = "list_school"
 
-class list_proficency(generics.ListCreateAPIView):
+class list_proficiency(generics.ListCreateAPIView):
 
-    """ This Class List all the proficency available 
+    """ This Class List all the proficiency available
     if username arg is not passed with the url
     it will return all the available proficiency but if passed
-    it will return only the proficency of the username"""
-    serializer_class = ProfiencySerial
-    
-    name = "List_proficency"
-    
+    it will return only the proficiency of the username"""
+    serializer_class = ProficiencySerial
+
+    name = "List_proficiency"
+
     def get_queryset(self):
         url_arg = self.request.query_params.get("username" , None)
 
         if url_arg:
-        
-            return Profiency.objects.filter(about__about__user__username = url_arg)
 
-        return Profiency.objects.all()
+            return Proficiency.objects.filter(about__about__user__username = url_arg)
 
-class update_profiency(generics.RetrieveUpdateAPIView):
+        return Proficiency.objects.all()
+
+class update_proficiency(generics.RetrieveUpdateAPIView):
     """
     this Class is responsible to update a single school at a given time
      and this could only be called with its Id"""
-    serializer_class = ProfiencySerial
-    queryset = Profiency.objects.all()
+    serializer_class = ProficiencySerial
+    queryset = Proficiency.objects.all()
     name = "update_proficiency"
     
 
@@ -175,7 +175,7 @@ class api_root(generics.GenericAPIView):
             List_portfolio.name : reverse("portfolio:"+List_portfolio.name , request=req),
             list_about.name :reverse("portfolio:"+list_about.name , request=req),
             list_school.name : reverse("portfolio:"+list_school.name , request=req), 
-            list_proficency.name : reverse("portfolio:"+list_proficency.name , request=req),       
+            list_proficiency.name : reverse("portfolio:"+list_proficiency.name , request=req),
             list_resume.name : reverse("portfolio:"+list_resume.name , request=req),
 
         })
