@@ -193,8 +193,8 @@ class list_goals(generics.ListCreateAPIView):
         return Goal.objects.all()
 
 
-class update_goal(generics.RetrieveUpdateAPIView):
-    """ this class is responsible to update a single goal at a given time """
+class update_goal(generics.RetrieveUpdateDestroyAPIView):
+    """ this class is responsible to update or delete a single goal at a given time """
     serializer_class = GoalSerial
     queryset = Goal.objects.all()
     name = "update_goal"
