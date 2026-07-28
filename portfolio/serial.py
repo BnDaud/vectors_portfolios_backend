@@ -8,6 +8,22 @@ from django.utils.text import slugify
 from .models import Profile , Portfolio , About , Resume , School , Proficiency , PortfolioTrack , Goal
 
 
+def _unique_slug(profile , name , exclude_pk = None):
+    base = slugify(name)
+    slug = base
+    suffix = 2
+    qs = PortfolioTrack.objects.filter(profile = profile , slug = slug)
+    if exclude_pk:
+        qs = qs.exclude(pk = exclude_pk)
+    while qs.exists():
+        slug = f"{base}-{suffix}"
+        suffix += 1
+        qs = PortfolioTrack.objects.filter(profile = profile , slug = slug)
+        if exclude_pk:
+            qs = qs.exclude(pk = exclude_pk)
+    return slug
+
+
 class Userserial(ModelSerializer):
 
     """ this serializer is responsible for the creation of new user
@@ -125,7 +141,7 @@ class PortfolioTrackSerial(ModelSerializer):
             raise serializers.ValidationError({"username": "This field is required."})
 
         profile = Profile.objects.get(user__username = username)
-        validated_data.setdefault("slug" , slugify(validated_data["name"]))
+        validated_data.setdefault("slug" , _unique_slug(profile , validated_data["name"]))
         track = PortfolioTrack.objects.create(profile = profile , **validated_data)
 
         if copy_from_id:
@@ -156,6 +172,17 @@ class PortfolioTrackSerial(ModelSerializer):
             About.objects.create(track = track , skill = "" , description = "" , image_link = "")
 
         return track
+
+    def update(self , instance , validated_data):
+        validated_data.pop("username" , None)
+        validated_data.pop("copy_from" , None)
+        validated_data.pop("copy_portfolio_items" , None)
+
+        new_name = validated_data.get("name")
+        if new_name and new_name != instance.name and "slug" not in validated_data:
+            validated_data["slug"] = _unique_slug(instance.profile , new_name , exclude_pk = instance.pk)
+
+        return super().update(instance , validated_data)
 
 
 class GoalSerial(ModelSerializer):
