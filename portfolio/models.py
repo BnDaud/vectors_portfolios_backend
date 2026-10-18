@@ -60,19 +60,37 @@ class PortfolioTrack(models.Model):
         return f"{self.profile.user.username} - {self.name}"
 
 
+def current_year():
+    return date.today().year
+
+
 class About(models.Model):
     track = models.OneToOneField(PortfolioTrack , on_delete=models.CASCADE , related_name="about" )
     skill = models.CharField(blank=False , max_length=100)
+    # Superseded by experience_base_years/experience_base_year below and no
+    # longer read anywhere; kept so no data is dropped.
     experience_since = models.DateField(null=True , blank=True)
+    # Years of experience as entered, and the calendar year they were entered
+    # in. years_of_experience adds one for every January 1 since then, so the
+    # number rolls over by itself with no scheduled job, per track.
+    experience_base_years = models.PositiveSmallIntegerField(default=0 , validators=[MaxValueValidator(80)])
+    experience_base_year = models.PositiveSmallIntegerField(default=current_year , editable=False)
     #education = models.CharField(max_length=200)# i will drop this column later
     description = models.TextField(max_length=1000 , default="")
     image_link = models.URLField(default="" , blank=True)
 
     @property
     def years_of_experience(self):
-        if not self.experience_since:
-            return 0
-        return max(0 , (date.today() - self.experience_since).days // 365)
+        return self.experience_base_years + max(0 , current_year() - self.experience_base_year)
+
+    def save(self , *args , **kwargs):
+        # Whenever the number is changed (API or admin), re-anchor it to the
+        # current year so the stored value is "as of now".
+        if self.pk:
+            previous = type(self).objects.filter(pk = self.pk).values_list("experience_base_years" , flat = True).first()
+            if previous is not None and previous != self.experience_base_years:
+                self.experience_base_year = current_year()
+        super().save(*args , **kwargs)
 
     def __str__(self):
         return "About " + self.track.profile.user.username

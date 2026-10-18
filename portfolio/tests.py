@@ -1,5 +1,8 @@
+import importlib
 from datetime import date
+from unittest import mock
 
+from django.apps import apps as django_apps
 from django.contrib.auth.models import User
 from rest_framework.test import APIClient, APITestCase
 
@@ -261,3 +264,149 @@ class RecentChangesTests(APITestCase):
     def test_cleared_experience_date_can_be_saved_as_null(self):
         res = self.client.patch(f"{API}/about/{self.about.id}", {"experience_since": None}, format="json")
         self.assertEqual(res.status_code, 200, res.content)
+
+
+class ExperienceYearsTests(APITestCase):
+    """Years of experience are entered per portfolio and gain +1 every
+    January 1 on their own."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user("owner", password="pw")
+        cls.profile = Profile.objects.create(user=cls.user, display_pic="https://img.example.com/p.png")
+
+    def setUp(self):
+        self.client = APIClient(HTTP_HOST="localhost")
+        self.client.force_authenticate(user=self.user)
+
+    def make_track(self, name, slug, years, entered_in=2026):
+        track = PortfolioTrack.objects.create(profile=self.profile, name=name, slug=slug,
+                                              display_pic="https://img.example.com/p.png")
+        about = About.objects.create(track=track, skill=name, description="d",
+                                     experience_base_years=years, experience_base_year=entered_in)
+        return track, about
+
+    @staticmethod
+    def pretend_year(year):
+        return mock.patch("portfolio.models.current_year", return_value=year)
+
+    def api_years(self, about):
+        return self.client.get(f"{API}/about/{about.id}").json()["years_of_experience"]
+
+    def test_gains_one_year_every_january_first(self):
+        _, about = self.make_track("Full Stack", "full-stack", years=4, entered_in=2026)
+        for year, expected in [(2026, 4), (2027, 5), (2028, 6), (2036, 14)]:
+            with self.pretend_year(year):
+                self.assertEqual(self.api_years(about), expected, year)
+
+    def test_same_year_does_not_change_and_never_goes_negative(self):
+        _, about = self.make_track("Full Stack", "full-stack", years=4, entered_in=2026)
+        with self.pretend_year(2026):
+            self.assertEqual(about.years_of_experience, 4)
+        with self.pretend_year(2020):
+            self.assertEqual(about.years_of_experience, 4)
+
+    def test_each_portfolio_has_its_own_years(self):
+        _, a = self.make_track("Full Stack", "full-stack", years=4)
+        _, b = self.make_track("CAD Engineer", "cad", years=1)
+        with self.pretend_year(2027):
+            self.assertEqual((self.api_years(a), self.api_years(b)), (5, 2))
+        res = self.client.patch(f"{API}/about/{b.id}", {"experience_base_years": 3}, format="json")
+        self.assertEqual(res.status_code, 200, res.content)
+        a.refresh_from_db(); b.refresh_from_db()
+        self.assertEqual((a.experience_base_years, b.experience_base_years), (4, 3))
+
+    def test_saving_a_number_anchors_it_to_the_current_year(self):
+        _, about = self.make_track("Full Stack", "full-stack", years=4, entered_in=2026)
+        with self.pretend_year(2028):
+            self.assertEqual(self.api_years(about), 6)          # what the form shows
+            res = self.client.patch(f"{API}/about/{about.id}", {"experience_base_years": 6}, format="json")
+            self.assertEqual(res.status_code, 200, res.content)
+            self.assertEqual(res.json()["years_of_experience"], 6)
+        about.refresh_from_db()
+        self.assertEqual((about.experience_base_years, about.experience_base_year), (6, 2028))
+        with self.pretend_year(2029):
+            self.assertEqual(self.api_years(about), 7)
+
+    def test_editing_other_fields_keeps_the_rollover_going(self):
+        _, about = self.make_track("Full Stack", "full-stack", years=4, entered_in=2026)
+        with self.pretend_year(2027):
+            res = self.client.patch(f"{API}/about/{about.id}", {"description": "new text"}, format="json")
+            self.assertEqual(res.status_code, 200, res.content)
+        about.refresh_from_db()
+        self.assertEqual((about.experience_base_years, about.experience_base_year), (4, 2026))
+        with self.pretend_year(2027):
+            self.assertEqual(self.api_years(about), 5)
+
+    def test_typing_the_stored_number_again_after_new_year_sets_exactly_that(self):
+        # Entered 2 in 2025; in 2026 the page shows 3. Typing 2 must show 2.
+        _, about = self.make_track("CAD Engineer", "cad", years=2, entered_in=2025)
+        with self.pretend_year(2026):
+            self.assertEqual(self.api_years(about), 3)
+            res = self.client.patch(f"{API}/about/{about.id}", {"experience_base_years": 2}, format="json")
+            self.assertEqual(res.status_code, 200, res.content)
+            self.assertEqual(res.json()["years_of_experience"], 2)
+            self.assertEqual(self.api_years(about), 2)
+        with self.pretend_year(2027):
+            self.assertEqual(self.api_years(about), 3)
+
+    def test_saving_the_displayed_number_unchanged_is_harmless(self):
+        _, about = self.make_track("Full Stack", "full-stack", years=4, entered_in=2026)
+        with self.pretend_year(2027):
+            self.client.patch(f"{API}/about/{about.id}", {"experience_base_years": 5}, format="json")
+            self.assertEqual(self.api_years(about), 5)
+        with self.pretend_year(2028):
+            self.assertEqual(self.api_years(about), 6)
+
+    def test_clients_cannot_set_the_anchor_year(self):
+        _, about = self.make_track("Full Stack", "full-stack", years=4, entered_in=2026)
+        self.client.patch(f"{API}/about/{about.id}", {"experience_base_year": 1990}, format="json")
+        about.refresh_from_db()
+        self.assertEqual(about.experience_base_year, 2026)
+
+    def test_years_validation(self):
+        _, about = self.make_track("Full Stack", "full-stack", years=4)
+        url = f"{API}/about/{about.id}"
+        for bad in (-1, 81, 4.5, "abc", None):
+            res = self.client.patch(url, {"experience_base_years": bad}, format="json")
+            self.assertEqual(res.status_code, 400, bad)
+        for good in (0, 80, 12):
+            res = self.client.patch(url, {"experience_base_years": good}, format="json")
+            self.assertEqual(res.status_code, 200, good)
+
+    def test_duplicate_carries_years_and_then_stands_alone(self):
+        source, about = self.make_track("Full Stack", "full-stack", years=4, entered_in=2026)
+        with self.pretend_year(2027):
+            res = self.client.post(f"{API}/tracks/", {"username": "owner", "name": "Copy", "copy_from": source.id},
+                                   format="json")
+            self.assertEqual(res.status_code, 201, res.content)
+            copy_about = About.objects.get(track_id=res.json()["id"])
+            self.assertEqual(self.api_years(copy_about), self.api_years(about))
+            self.assertEqual(copy_about.years_of_experience, 5)
+
+            self.client.patch(f"{API}/about/{copy_about.id}", {"experience_base_years": 9}, format="json")
+            self.assertEqual(self.api_years(about), 5)
+            self.client.patch(f"{API}/about/{about.id}", {"experience_base_years": 2}, format="json")
+            copy_about.refresh_from_db()
+            self.assertEqual(copy_about.years_of_experience, 9)
+
+    def test_blank_track_starts_at_zero(self):
+        res = self.client.post(f"{API}/tracks/", {"username": "owner", "name": "Blank"}, format="json")
+        self.assertEqual(res.status_code, 201, res.content)
+        self.assertEqual(res.json()["about"]["years_of_experience"], 0)
+
+    def test_data_migration_converts_the_start_date(self):
+        migration = importlib.import_module("portfolio.migrations.0014_experience_years_from_since")
+        _, dated = self.make_track("Full Stack", "full-stack", years=0, entered_in=2000)
+        dated.experience_since = date(2022, 7, 29)
+        dated.save()
+        _, undated = self.make_track("CAD", "cad", years=7, entered_in=2000)
+        About.objects.filter(pk=undated.pk).update(experience_since=None)
+
+        with mock.patch.object(migration, "date") as fake_date:
+            fake_date.today.return_value = date(2026, 10, 18)
+            migration.experience_years_from_start_date(django_apps, None)
+
+        dated.refresh_from_db(); undated.refresh_from_db()
+        self.assertEqual((dated.experience_base_years, dated.experience_base_year), (4, 2026))
+        self.assertEqual((undated.experience_base_years, undated.experience_base_year), (0, 2026))

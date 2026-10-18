@@ -6,6 +6,7 @@ from rest_framework import serializers
 from django.contrib.auth.models import User
 from django.utils.text import slugify
 from django.db import transaction
+from . import models as portfolio_models
 from .models import Profile , Portfolio , About , Resume , School , Proficiency , PortfolioTrack , Goal , TRACK_CONTACT_FIELDS
 
 
@@ -102,6 +103,14 @@ class AboutSerial(ModelSerializer):
     def get_years_of_experience(self , obj):
         return obj.years_of_experience
 
+    def update(self , instance , validated_data):
+        # Any save of the number means "this many years as of today", even if
+        # it equals the stored base: after a January 1 the form shows base + 1,
+        # so typing the old base back has to re-anchor it, not be ignored.
+        if "experience_base_years" in validated_data:
+            validated_data["experience_base_year"] = portfolio_models.current_year()
+        return super().update(instance , validated_data)
+
     class Meta:
         model = About
         fields = "__all__"
@@ -167,6 +176,8 @@ class PortfolioTrackSerial(ModelSerializer):
                 track = track,
                 skill = source_about.skill,
                 experience_since = source_about.experience_since,
+                experience_base_years = source_about.experience_base_years,
+                experience_base_year = source_about.experience_base_year,
                 description = source_about.description,
                 image_link = source_about.image_link,
             )
