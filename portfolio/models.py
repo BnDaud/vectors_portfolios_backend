@@ -46,7 +46,7 @@ class About(models.Model):
     skill = models.CharField(blank=False , max_length=100)
     experience_since = models.DateField(null=True , blank=True)
     #education = models.CharField(max_length=200)# i will drop this column later
-    description = models.TextField(max_length=500 , default="")
+    description = models.TextField(max_length=1000 , default="")
     image_link = models.URLField(default="" , blank=True)
 
     @property
@@ -111,6 +111,7 @@ class Portfolio(models.Model):
         DataAnalysis = "DataAnalysis", "DataAnalysis"
         DatabaseAdmin = "DatabaseAdmin", "DatabaseAdmin"
         NetworkEng = "NetworkEng", "NetworkEng"
+        CAD = "CAD", "CAD"
 
         Marketing = "Marketing", "Marketing"
         DigitalMarketing = "DigitalMarketing", "DigitalMarketing"
