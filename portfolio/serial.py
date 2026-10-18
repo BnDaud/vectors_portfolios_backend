@@ -5,7 +5,8 @@ from rest_framework.serializers import IntegerField , BooleanField
 from rest_framework import serializers
 from django.contrib.auth.models import User
 from django.utils.text import slugify
-from .models import Profile , Portfolio , About , Resume , School , Proficiency , PortfolioTrack , Goal
+from django.db import transaction
+from .models import Profile , Portfolio , About , Resume , School , Proficiency , PortfolioTrack , Goal , TRACK_CONTACT_FIELDS
 
 
 def _unique_slug(profile , name , exclude_pk = None):
@@ -129,9 +130,10 @@ class PortfolioTrackSerial(ModelSerializer):
     class Meta:
         model = PortfolioTrack
         fields = ["id" , "name" , "slug" , "is_default" , "order" , "about" , "items" ,
-                  "username" , "copy_from" , "copy_portfolio_items"]
+                  "username" , "copy_from" , "copy_portfolio_items"] + TRACK_CONTACT_FIELDS
         extra_kwargs = {"slug": {"required": False}}
 
+    @transaction.atomic
     def create(self , validated_data):
         username = validated_data.pop("username" , None)
         copy_from_id = validated_data.pop("copy_from" , None)
@@ -141,11 +143,25 @@ class PortfolioTrackSerial(ModelSerializer):
             raise serializers.ValidationError({"username": "This field is required."})
 
         profile = Profile.objects.get(user__username = username)
-        validated_data.setdefault("slug" , _unique_slug(profile , validated_data["name"]))
-        track = PortfolioTrack.objects.create(profile = profile , **validated_data)
 
+        # Resolve the source before creating anything so a bad copy_from
+        # can't leave a half-made track behind.
+        source = None
         if copy_from_id:
-            source = PortfolioTrack.objects.get(pk = copy_from_id , profile = profile)
+            source = PortfolioTrack.objects.filter(pk = copy_from_id , profile = profile).first()
+            if source is None:
+                raise serializers.ValidationError({"copy_from": "Portfolio not found."})
+
+        # A new track gets its own copy of the dp/contact values - from the
+        # track it is cloned from, else from the owner's profile - and is
+        # independent of that origin from then on.
+        origin = source or profile
+        initial = {field: getattr(origin , field) for field in TRACK_CONTACT_FIELDS}
+
+        validated_data.setdefault("slug" , _unique_slug(profile , validated_data["name"]))
+        track = PortfolioTrack.objects.create(profile = profile , **{**initial , **validated_data})
+
+        if source is not None:
             source_about = source.about
             new_about = About.objects.create(
                 track = track,

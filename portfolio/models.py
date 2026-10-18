@@ -23,12 +23,31 @@ class Profile(models.Model):
         return self.user.username
 
 
+# Contact/picture fields every track carries for itself, so each portfolio
+# can show its own dp and links. Profile keeps the same fields as the
+# owner-level default a brand new track starts from.
+TRACK_CONTACT_FIELDS = [
+    "display_pic" , "github" , "linkedin" , "whatapp" , "facebook" ,
+    "twitter" , "email" , "phone_number" ,
+]
+
+
 class PortfolioTrack(models.Model):
     profile = models.ForeignKey(Profile , on_delete=models.CASCADE , related_name="tracks")
     name = models.CharField(max_length=100)
     slug = models.SlugField(max_length=110)
     is_default = models.BooleanField(default=False)
     order = models.PositiveIntegerField(default=0)
+
+    display_pic = models.URLField(default="" , blank=False)
+    linkedin = models.URLField(default="" , blank=True)
+    github = models.URLField(default="" , blank=True)
+    whatapp = models.URLField(default="" , blank=True)
+    facebook = models.URLField(default="" , blank=True)
+    twitter = models.URLField(default="" , blank=True)
+    email = models.CharField(default="" , blank=True , max_length=50)
+    phone_number = models.CharField(default="" , blank=True , max_length=50)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
