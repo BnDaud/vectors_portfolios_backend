@@ -34,7 +34,9 @@ class Userserial(ModelSerializer):
 
 
     """
-    password = CharField(write_only = False , required = True)
+    # write_only: this serializer is nested in the public profile payload, and
+    # the stored hash must never be readable there.
+    password = CharField(write_only = True , required = True)
     class Meta:
         model = User
         fields = ["username" , "first_name" , "last_name" , "password"]
@@ -184,13 +186,15 @@ class PortfolioTrackSerial(ModelSerializer):
             for r in source_about.resume.all():
                 Resume.objects.create(about = new_about , post = r.post , start_year = r.start_year ,
                                        end_year = r.end_year , company_name = r.company_name ,
-                                       certificate_link = r.certificate_link)
+                                       certificate_link = r.certificate_link , description = r.description)
             for s in source_about.school.all():
                 School.objects.create(about = new_about , start_year = s.start_year , end_year = s.end_year ,
-                                       school_name = s.school_name , certificate_link = s.certificate_link)
+                                       school_name = s.school_name , certificate_link = s.certificate_link ,
+                                       description = s.description)
             for p in source_about.proficiency.all():
                 Proficiency.objects.create(about = new_about , skill_name = p.skill_name ,
-                                            skill_range = p.skill_range , certificate_link = p.certificate_link)
+                                            skill_range = p.skill_range , certificate_link = p.certificate_link ,
+                                            description = p.description)
             if copy_items:
                 for item in source.items.all():
                     Portfolio.objects.create(track = track , category = item.category , name = item.name ,

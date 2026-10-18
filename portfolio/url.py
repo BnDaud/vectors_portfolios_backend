@@ -2,7 +2,8 @@ from django.urls import path, re_path
 from .views import ListCreateProfile , api_root , list_about , Userdetail ,updateUserdetail , UpdateProfile
 from .views import List_portfolio ,list_about ,UpdateAbout , updateportfolio , list_resume , update_resume , list_school , update_school , list_proficiency , update_proficiency
 from .views import list_tracks , update_track , list_goals , update_goal , complete_goal
-from .auth_views import CsrfPrimeView , LoginView , LogoutView , RefreshView , MeView
+from .auth_views import CsrfPrimeView , LoginView , LogoutView , RefreshView , MeView , ChangePasswordView
+from .analytics_views import RecordVisitView , VisitorSummaryView
 
 app_name = "portfolio"
 
@@ -96,11 +97,19 @@ urlpatterns = [
     #auth/logout clears both cookies
     #auth/refresh reissues access_token from refresh_token cookie
     #auth/me reports whether the current request is authenticated
+    #auth/change-password takes current_password + new_password for the signed-in user
 
     path("auth/csrf" , view=CsrfPrimeView.as_view() , name=CsrfPrimeView.name),
     path("auth/login" , view=LoginView.as_view() , name=LoginView.name),
     path("auth/logout" , view=LogoutView.as_view() , name=LogoutView.name),
     path("auth/refresh" , view=RefreshView.as_view() , name=RefreshView.name),
     path("auth/me" , view=MeView.as_view() , name=MeView.name),
+    path("auth/change-password" , view=ChangePasswordView.as_view() , name=ChangePasswordView.name),
+
+    #analytics/visit is the public beacon the site calls on every page open (always 204)
+    #analytics/summary is the owner-only visitor report (landing page, signed in)
+
+    path("analytics/visit" , view=RecordVisitView.as_view() , name=RecordVisitView.name),
+    path("analytics/summary" , view=VisitorSummaryView.as_view() , name=VisitorSummaryView.name),
 
 ]

@@ -4,11 +4,19 @@ from unittest import mock
 
 from django.apps import apps as django_apps
 from django.contrib.auth.models import User
+from django.core.cache import cache
+from django.core.management import call_command
+from io import StringIO
+from django.test import override_settings
+import uuid
+from datetime import timedelta
+from django.utils import timezone
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.test import APIClient, APITestCase
 
 from .models import (
-    About, Portfolio, PortfolioTrack, Profile, Proficiency, Resume, School,
-    TRACK_CONTACT_FIELDS,
+    About, ENTRY_DESCRIPTION_MAX, PageView, Portfolio, PortfolioTrack, Profile, Proficiency, Resume, School,
+    TRACK_CONTACT_FIELDS, Visitor,
 )
 
 API = "/api_root"
@@ -410,3 +418,401 @@ class ExperienceYearsTests(APITestCase):
         dated.refresh_from_db(); undated.refresh_from_db()
         self.assertEqual((dated.experience_base_years, dated.experience_base_year), (4, 2026))
         self.assertEqual((undated.experience_base_years, undated.experience_base_year), (0, 2026))
+
+
+class EntryDescriptionTests(APITestCase):
+    """Resume, education and skill entries carry an optional, capped
+    description shown on the resume board."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user("owner", password="pw")
+        profile = Profile.objects.create(user=cls.user, display_pic="https://img.example.com/p.png")
+        cls.track = PortfolioTrack.objects.create(profile=profile, name="Full Stack", slug="full-stack",
+                                                  display_pic="https://img.example.com/p.png")
+        cls.about = About.objects.create(track=cls.track, skill="s", description="d")
+        cls.resume = Resume.objects.create(about=cls.about, post="Dev", company_name="Acme",
+                                           start_year=date(2022, 1, 1), end_year=date(2023, 1, 1),
+                                           description="Built things.")
+        cls.school = School.objects.create(about=cls.about, school_name="Uni", start_year=date(2018, 1, 1),
+                                           end_year=date(2022, 1, 1), description="Studied things.")
+        cls.skill = Proficiency.objects.create(about=cls.about, skill_name="Python", skill_range=80,
+                                               description="Used daily.")
+
+    def setUp(self):
+        self.client = APIClient(HTTP_HOST="localhost")
+        self.client.force_authenticate(user=self.user)
+
+    def urls(self):
+        return {"resume": f"{API}/resume/{self.resume.id}", "school": f"{API}/school/{self.school.id}",
+                "proficiency": f"{API}/proficiency/{self.skill.id}"}
+
+    def test_cap_is_240(self):
+        self.assertEqual(ENTRY_DESCRIPTION_MAX, 240)
+
+    def test_description_is_optional_everywhere(self):
+        for name, url in self.urls().items():
+            res = self.client.patch(url, {"description": ""}, format="json")
+            self.assertEqual(res.status_code, 200, (name, res.content))
+        res = self.client.post(f"{API}/resume/", {"about": self.about.id, "post": "Dev 2", "company_name": "B",
+                                                  "start_year": "2023-01-01", "end_year": "2024-01-01"}, format="json")
+        self.assertEqual(res.status_code, 201, res.content)
+        self.assertEqual(res.json()["description"], "")
+
+    def test_description_cap_enforced_on_all_three(self):
+        for name, url in self.urls().items():
+            ok = self.client.patch(url, {"description": "x" * 240}, format="json")
+            self.assertEqual(ok.status_code, 200, (name, ok.content))
+            bad = self.client.patch(url, {"description": "x" * 241}, format="json")
+            self.assertEqual(bad.status_code, 400, name)
+            self.assertIn("description", bad.json())
+
+    def test_descriptions_are_in_the_public_payload(self):
+        data = self.client.get(f"{API}/profiles/?username=owner").json()[0]
+        about = data["tracks"][0]["about"]
+        self.assertEqual(about["resume"][0]["description"], "Built things.")
+        self.assertEqual(about["school"][0]["description"], "Studied things.")
+        self.assertEqual(about["proficiency"][0]["description"], "Used daily.")
+
+    def test_duplicate_copies_descriptions_and_they_then_diverge(self):
+        res = self.client.post(f"{API}/tracks/", {"username": "owner", "name": "Copy", "copy_from": self.track.id},
+                               format="json")
+        self.assertEqual(res.status_code, 201, res.content)
+        copy_about = About.objects.get(track_id=res.json()["id"])
+        self.assertEqual(copy_about.resume.get().description, "Built things.")
+        self.assertEqual(copy_about.school.get().description, "Studied things.")
+        self.assertEqual(copy_about.proficiency.get().description, "Used daily.")
+
+        self.client.patch(f"{API}/resume/{copy_about.resume.get().id}", {"description": "Copy only"}, format="json")
+        self.resume.refresh_from_db()
+        self.assertEqual(self.resume.description, "Built things.")
+
+
+@override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])   # fast, tests only
+class ChangePasswordTests(APITestCase):
+    OLD = "Old-Passw0rd-xyz"
+    NEW = "Brand-New-Passw0rd-42"
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user("owner", password=cls.OLD, first_name="Own", last_name="Er")
+        Profile.objects.create(user=cls.user, display_pic="https://img.example.com/p.png")
+
+    def setUp(self):
+        cache.clear()      # the endpoint is rate limited; keep tests independent
+        self.url = f"{API}/auth/change-password"
+
+    def session(self, password=None):
+        client = APIClient(HTTP_HOST="localhost")
+        res = client.post(f"{API}/auth/login", {"username": "owner", "password": password or self.OLD}, format="json")
+        self.assertEqual(res.status_code, 200, res.content)
+        return client
+
+    def me(self, client):
+        return client.get(f"{API}/auth/me").json()["authenticated"]
+
+    def change(self, client, current, new):
+        return client.post(self.url, {"current_password": current, "new_password": new}, format="json")
+
+    def test_wrong_current_password_is_rejected_and_nothing_changes(self):
+        client = self.session()
+        res = self.change(client, "not-the-password", self.NEW)
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("current_password", res.json())
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password(self.OLD))
+
+    def test_weak_or_unchanged_new_passwords_are_rejected(self):
+        client = self.session()
+        for weak in ("short1", "password123", "12345678901", "owner1234", self.OLD):
+            res = self.change(client, self.OLD, weak)
+            self.assertEqual(res.status_code, 400, weak)
+            self.assertIn("new_password", res.json(), weak)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password(self.OLD))
+
+    def test_missing_fields_are_rejected(self):
+        client = self.session()
+        res = client.post(self.url, {}, format="json")
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(set(res.json()), {"current_password", "new_password"})
+
+    def test_change_works_and_the_same_session_keeps_going(self):
+        client = self.session()
+        res = self.change(client, self.OLD, self.NEW)
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertIn("access_token", res.cookies)
+        self.assertIn("refresh_token", res.cookies)
+        self.assertTrue(self.me(client), "current session should stay signed in")
+        # and it can still write
+        track = PortfolioTrack.objects.create(profile=Profile.objects.get(), name="T", slug="t",
+                                              display_pic="https://img.example.com/p.png")
+        res = client.patch(f"{API}/tracks/{track.id}", {"name": "T2"}, format="json")
+        self.assertEqual(res.status_code, 200, res.content)
+
+    def test_old_password_stops_working_and_new_one_logs_in(self):
+        self.change(self.session(), self.OLD, self.NEW)
+        anon = APIClient(HTTP_HOST="localhost")
+        self.assertEqual(anon.post(f"{API}/auth/login", {"username": "owner", "password": self.OLD},
+                                   format="json").status_code, 401)
+        self.assertEqual(anon.post(f"{API}/auth/login", {"username": "owner", "password": self.NEW},
+                                   format="json").status_code, 200)
+
+    def test_other_sessions_are_signed_out_but_can_log_in_again(self):
+        phone, laptop = self.session(), self.session()
+        self.assertTrue(self.me(phone) and self.me(laptop))
+
+        self.assertEqual(self.change(laptop, self.OLD, self.NEW).status_code, 200)
+
+        self.assertFalse(self.me(phone), "old session must be revoked")
+        track = PortfolioTrack.objects.create(profile=Profile.objects.get(), name="T", slug="t",
+                                              display_pic="https://img.example.com/p.png")
+        self.assertIn(phone.patch(f"{API}/tracks/{track.id}", {"name": "Hacked"}, format="json").status_code,
+                      (401, 403))
+        # public reads and logging in again still work with the stale cookies attached
+        self.assertEqual(phone.get(f"{API}/tracks/").status_code, 200)
+        relog = phone.post(f"{API}/auth/login", {"username": "owner", "password": self.NEW}, format="json")
+        self.assertEqual(relog.status_code, 200, relog.content)
+        self.assertTrue(self.me(phone))
+
+    def test_anonymous_cannot_change_a_password(self):
+        res = self.change(APIClient(HTTP_HOST="localhost"), self.OLD, self.NEW)
+        self.assertIn(res.status_code, (401, 403))
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password(self.OLD))
+
+    def test_guessing_is_rate_limited(self):
+        client = self.session()
+        codes = [self.change(client, f"guess-{i}", self.NEW).status_code for i in range(7)]
+        self.assertEqual(codes[:5], [400] * 5)
+        self.assertEqual(codes[5], 429)
+
+    def test_password_hash_is_never_in_the_public_profile(self):
+        anon = APIClient(HTTP_HOST="localhost")
+        for url in (f"{API}/profiles/?username=owner", f"{API}/profiles/{Profile.objects.get().id}"):
+            body = anon.get(url).content.decode()
+            self.assertNotIn("pbkdf2", body, url)
+            self.assertNotIn('"password"', body, url)
+
+
+class SeedEntryDescriptionsTests(APITestCase):
+    """The one-off command that drafts descriptions for existing entries."""
+
+    @classmethod
+    def setUpTestData(cls):
+        user = User.objects.create_user("owner", password="pw")
+        profile = Profile.objects.create(user=user, display_pic="https://img.example.com/p.png")
+        track = PortfolioTrack.objects.create(profile=profile, name="Full Stack", slug="full-stack",
+                                              display_pic="https://img.example.com/p.png")
+        about = About.objects.create(track=track, skill="s", description="d")
+        cls.job = Resume.objects.create(about=about, post="Robotic Instructor", company_name="Al Izzah",
+                                        start_year=date(2022, 9, 1), end_year=date(2022, 10, 1))
+        cls.written = Resume.objects.create(about=about, post="Class Teacher", company_name="Al Izzah",
+                                            start_year=date(2022, 10, 1), end_year=date(2023, 1, 1),
+                                            description="My own words.")
+        cls.unknown = Resume.objects.create(about=about, post="Astronaut", company_name="NASA",
+                                            start_year=date(2020, 1, 1), end_year=date(2021, 1, 1))
+        cls.skill = Proficiency.objects.create(about=about, skill_name="Python", skill_range=80)
+        cls.school = School.objects.create(about=about, school_name="Uni", start_year=date(2018, 1, 1),
+                                           end_year=date(2022, 1, 1))
+
+    def run_command(self, *args):
+        out = StringIO()
+        call_command("seed_entry_descriptions", *args, stdout=out)
+        return out.getvalue()
+
+    def test_dry_run_changes_nothing(self):
+        output = self.run_command()
+        self.assertIn("dry run", output)
+        self.job.refresh_from_db()
+        self.assertEqual(self.job.description, "")
+
+    def test_apply_fills_blanks_only(self):
+        self.run_command("--apply")
+        for entry in (self.job, self.written, self.unknown, self.skill, self.school):
+            entry.refresh_from_db()
+        self.assertTrue(self.job.description)
+        self.assertTrue(self.skill.description)
+        self.assertEqual(self.written.description, "My own words.", "never overwrites what the owner wrote")
+        self.assertEqual(self.unknown.description, "", "entries without a draft are left alone")
+        self.assertEqual(self.school.description, "", "education is left for the owner to write")
+
+    def test_is_idempotent(self):
+        self.run_command("--apply")
+        self.assertIn("0 entries", self.run_command("--apply"))
+
+    def test_every_draft_fits_the_cap(self):
+        from portfolio.management.commands import seed_entry_descriptions as seed
+        for text in list(seed.RESUME_DESCRIPTIONS.values()) + list(seed.SKILL_DESCRIPTIONS.values()):
+            self.assertLessEqual(len(text), ENTRY_DESCRIPTION_MAX, text)
+
+
+BROWSER = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+
+
+@override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])   # fast, tests only
+class VisitorAnalyticsTests(APITestCase):
+    """Anonymous visitor counting: the owner and bots don't count, a returning
+    person is a repeat on the same visitor, and only the owner can read it."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user("owner", password="Old-Passw0rd-xyz")
+        cls.profile = Profile.objects.create(user=cls.user, display_pic="https://img.example.com/p.png")
+        cls.fs = PortfolioTrack.objects.create(profile=cls.profile, name="Full Stack", slug="full-stack",
+                                               display_pic="https://img.example.com/p.png")
+        cls.cad = PortfolioTrack.objects.create(profile=cls.profile, name="CAD Engineer", slug="cad",
+                                                display_pic="https://img.example.com/p.png")
+
+    def setUp(self):
+        cache.clear()
+        self.url = f"{API}/analytics/visit"
+        self.summary = f"{API}/analytics/summary"
+
+    def browser(self, agent=BROWSER):
+        return APIClient(HTTP_HOST="localhost", HTTP_USER_AGENT=agent)
+
+    def visit(self, vid, path="/", client=None):
+        return (client or self.browser()).post(self.url, {"visitor_id": str(vid), "path": path}, format="json")
+
+    def owner_client(self):
+        client = self.browser()
+        res = client.post(f"{API}/auth/login", {"username": "owner", "password": "Old-Passw0rd-xyz"}, format="json")
+        self.assertEqual(res.status_code, 200, res.content)
+        return client
+
+    def at(self, moment):
+        return mock.patch("portfolio.analytics.timezone.now", return_value=moment)
+
+    # --- counting ------------------------------------------------------------
+
+    def test_a_first_visit_creates_one_visitor_and_one_page_view(self):
+        vid = uuid.uuid4()
+        self.assertEqual(self.visit(vid).status_code, 204)
+        visitor = Visitor.objects.get()
+        self.assertEqual((str(visitor.visitor_id), visitor.visit_count), (str(vid), 1))
+        view = PageView.objects.get()
+        self.assertIsNone(view.track)
+
+    def test_repeating_the_same_page_in_one_visit_changes_nothing(self):
+        vid = uuid.uuid4()
+        for _ in range(3):
+            self.visit(vid)
+            self.visit(vid, "full-stack")
+        self.assertEqual((Visitor.objects.count(), Visitor.objects.get().visit_count), (1, 1))
+        self.assertEqual(PageView.objects.count(), 2)       # landing + full-stack, once each
+
+    def test_browsing_more_portfolios_in_the_same_visit_is_not_a_new_visit(self):
+        vid = uuid.uuid4()
+        self.visit(vid); self.visit(vid, "full-stack"); self.visit(vid, "/cad")
+        visitor = Visitor.objects.get()
+        self.assertEqual(visitor.visit_count, 1)
+        self.assertEqual(set(visitor.views.values_list("track__slug", flat=True)), {None, "full-stack", "cad"})
+
+    def test_coming_back_later_is_a_repeat_on_the_same_visitor_not_a_new_one(self):
+        vid, start = uuid.uuid4(), timezone.now()
+        with self.at(start):
+            self.visit(vid, "full-stack")
+        with self.at(start + timedelta(minutes=10)):
+            self.visit(vid, "cad")                          # same session
+        self.assertEqual(Visitor.objects.get().visit_count, 1)
+        with self.at(start + timedelta(minutes=10 + 31)):
+            self.visit(vid, "full-stack")                   # a fresh visit, same person
+        self.assertEqual(Visitor.objects.count(), 1, "unique visitors must not go up")
+        self.assertEqual(Visitor.objects.get().visit_count, 2)
+        self.assertEqual(PageView.objects.filter(track=self.fs).count(), 2, "the repeat is recorded")
+
+    def test_different_browsers_are_different_visitors(self):
+        self.visit(uuid.uuid4()); self.visit(uuid.uuid4())
+        self.assertEqual(Visitor.objects.count(), 2)
+
+    # --- who is NOT counted ---------------------------------------------------
+
+    def test_the_signed_in_owner_is_never_counted(self):
+        owner = self.owner_client()
+        res = self.visit(uuid.uuid4(), "full-stack", client=owner)
+        self.assertEqual(res.status_code, 204)
+        self.assertEqual((Visitor.objects.count(), PageView.objects.count()), (0, 0))
+
+    def test_an_owner_whose_session_was_revoked_is_just_a_visitor(self):
+        owner = self.owner_client()
+        stale = {c: owner.cookies[c].value for c in ("access_token", "refresh_token")}
+        self.user.set_password("Some-Other-Pass-9"); self.user.save()      # revokes the old tokens
+        client = self.browser()
+        for name, value in stale.items():
+            client.cookies[name] = value
+        self.visit(uuid.uuid4(), client=client)
+        self.assertEqual(Visitor.objects.count(), 1)
+
+    def test_bots_and_automation_are_not_counted(self):
+        for agent in ("Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+                      "Mozilla/5.0 HeadlessChrome/120.0", "Slackbot-LinkExpanding 1.0", "python-requests/2.31",
+                      "facebookexternalhit/1.1", "Chrome-Lighthouse", ""):
+            self.assertEqual(self.visit(uuid.uuid4(), client=self.browser(agent)).status_code, 204, agent)
+        self.assertEqual(Visitor.objects.count(), 0)
+        self.visit(uuid.uuid4())
+        self.assertEqual(Visitor.objects.count(), 1)
+
+    def test_unknown_pages_are_ignored_and_look_identical_to_counted_ones(self):
+        res = self.visit(uuid.uuid4(), "no-such-portfolio")
+        self.assertEqual(res.status_code, 204)
+        self.assertEqual(Visitor.objects.count(), 0)
+
+    def test_bad_requests(self):
+        self.assertEqual(self.browser().post(self.url, {"path": "/"}, format="json").status_code, 400)
+        self.assertEqual(self.visit("not-a-uuid").status_code, 400)
+        res = self.browser().post(self.url, {"visitor_id": str(uuid.uuid4()), "path": {"x": 1}}, format="json")
+        self.assertEqual(res.status_code, 204)
+        self.assertEqual(Visitor.objects.count(), 0)
+
+    def test_the_beacon_is_rate_limited_per_ip(self):
+        with mock.patch.dict(ScopedRateThrottle.THROTTLE_RATES, {"visit": "3/hour"}):
+            codes = [self.visit(uuid.uuid4()).status_code for _ in range(5)]
+        self.assertEqual(codes, [204, 204, 204, 429, 429])
+        self.assertEqual(Visitor.objects.count(), 3)
+
+    # --- who can SEE it ---------------------------------------------------------
+
+    def test_only_the_signed_in_owner_can_read_the_summary(self):
+        self.assertIn(self.browser().get(self.summary).status_code, (401, 403))
+        self.assertEqual(self.owner_client().get(self.summary).status_code, 200)
+
+    def test_summary_numbers(self):
+        a, b, c, t0 = uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), timezone.now() - timedelta(hours=3)
+        with self.at(t0):
+            self.visit(a); self.visit(a, "full-stack")      # A: visit 1
+            self.visit(b, "cad")
+            self.visit(c)
+        with self.at(t0 + timedelta(hours=2)):
+            self.visit(a, "cad")                            # A comes back: visit 2
+        data = self.owner_client().get(self.summary).json()
+
+        self.assertEqual(data["unique_visitors"], 3, "A counted once even though they came twice")
+        self.assertEqual(data["returning_visitors"], 1)
+        self.assertEqual(data["total_visits"], 4)
+        self.assertEqual(data["new_last_7_days"], 3)
+        self.assertEqual(data["landing"], {"viewers": 2, "visits": 2})
+        by_slug = {p["slug"]: p for p in data["portfolios"]}
+        self.assertEqual(by_slug["full-stack"], {"slug": "full-stack", "name": "Full Stack", "viewers": 1, "visits": 1})
+        self.assertEqual((by_slug["cad"]["viewers"], by_slug["cad"]["visits"]), (2, 2))
+
+        recent = data["recent"]
+        self.assertEqual(len(recent), 3)
+        first = recent[0]                                    # A was seen most recently
+        self.assertTrue(first["returning"] and first["visits"] == 2)
+        self.assertEqual({v["slug"]: v["visits"] for v in first["viewed"]}, {"full-stack": 1, "cad": 1})
+        self.assertEqual(first["landing_visits"], 1)
+        self.assertFalse(any(r["returning"] for r in recent[1:]))
+
+    def test_summary_exposes_no_browser_ids_or_network_details(self):
+        vid = uuid.uuid4()
+        self.visit(vid)
+        body = self.owner_client().get(self.summary).content.decode()
+        self.assertNotIn(str(vid), body)
+        self.assertEqual({f.name for f in Visitor._meta.get_fields()} & {"ip", "ip_address", "user_agent"}, set())
+
+    def test_deleting_a_portfolio_keeps_the_visitors(self):
+        vid = uuid.uuid4()
+        self.visit(vid, "full-stack")
+        self.fs.delete()
+        self.assertEqual((Visitor.objects.count(), PageView.objects.count()), (1, 0))

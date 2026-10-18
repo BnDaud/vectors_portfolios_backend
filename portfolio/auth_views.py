@@ -1,11 +1,14 @@
 from django.conf import settings
 from django.contrib.auth import authenticate
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.middleware.csrf import get_token
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import ensure_csrf_cookie
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
 
@@ -83,6 +86,50 @@ class RefreshView(APIView):
 
         response = Response({"detail": "refreshed"})
         response.set_cookie(ACCESS_COOKIE, str(refresh.access_token), **_cookie_kwargs())
+        return response
+
+
+class ChangePasswordView(APIView):
+    """
+    Changes the signed-in user's password. The current password is required
+    (a stolen session alone can't lock the owner out), the new one goes
+    through Django's password validators, and the response re-issues this
+    session's cookies since every older token stops working.
+    """
+    name = "auth_change_password"
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "password_change"
+
+    def post(self, request):
+        current = request.data.get("current_password") or ""
+        new = request.data.get("new_password") or ""
+        user = request.user
+        errors = {}
+
+        if not user.check_password(current):
+            errors["current_password"] = ["Current password is incorrect."]
+
+        if not new:
+            errors["new_password"] = ["This field is required."]
+        elif new == current:
+            errors["new_password"] = ["The new password must be different from the current one."]
+        else:
+            try:
+                validate_password(new, user)
+            except DjangoValidationError as exc:
+                errors["new_password"] = list(exc.messages)
+
+        if errors:
+            return Response(errors, status=400)
+
+        user.set_password(new)
+        user.save(update_fields=["password"])
+
+        refresh = RefreshToken.for_user(user)
+        response = Response({"detail": "Password changed"})
+        response.set_cookie(ACCESS_COOKIE, str(refresh.access_token), **_cookie_kwargs())
+        response.set_cookie(REFRESH_COOKIE, str(refresh), **_cookie_kwargs())
         return response
 
 

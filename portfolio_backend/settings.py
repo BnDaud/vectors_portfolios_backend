@@ -103,11 +103,20 @@ REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.IsAuthenticatedOrReadOnly",
     ],
+    "DEFAULT_THROTTLE_RATES": {
+        # guessing the current password through a stolen session
+        "password_change": "5/min",
+        # per IP, for the public visitor beacon
+        "visit": "120/hour",
+    },
 }
 
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=30),
     "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
+    # Tokens carry a hash of the password they were issued under, so changing
+    # the password signs every other session out.
+    "CHECK_REVOKE_TOKEN": True,
 }
 
 

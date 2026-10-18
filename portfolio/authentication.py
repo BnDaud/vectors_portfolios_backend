@@ -39,10 +39,14 @@ class CookieJWTAuthentication(JWTAuthentication):
         # it as "not authenticated" rather than a hard failure, so a client
         # can still reach /auth/refresh (which itself goes through this
         # same authenticator) to get a new one.
+        # A token that stopped being valid for the user - e.g. the password was
+        # changed since it was issued (CHECK_REVOKE_TOKEN) - is likewise just
+        # "not authenticated", so login and public reads keep working.
         try:
             validated_token = self.get_validated_token(raw_token)
-        except (InvalidToken, TokenError):
+            user = self.get_user(validated_token)
+        except (InvalidToken, TokenError, exceptions.AuthenticationFailed):
             return None
 
         _enforce_csrf(request)
-        return self.get_user(validated_token), validated_token
+        return user, validated_token

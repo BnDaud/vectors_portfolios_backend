@@ -64,6 +64,11 @@ def current_year():
     return date.today().year
 
 
+# Cap for the optional short description on resume/education/skill entries,
+# kept small so the resume board on the portfolio page can't be overrun.
+ENTRY_DESCRIPTION_MAX = 240
+
+
 class About(models.Model):
     track = models.OneToOneField(PortfolioTrack , on_delete=models.CASCADE , related_name="about" )
     skill = models.CharField(blank=False , max_length=100)
@@ -103,6 +108,7 @@ class Resume(models.Model):
     end_year = models.DateField(auto_now=False , auto_now_add=False)
     company_name = models.CharField(max_length=50 , default="")
     certificate_link = models.URLField(blank=True , default="")
+    description = models.CharField(max_length=ENTRY_DESCRIPTION_MAX , blank=True , default="")
 
 class School(models.Model):
     about = models.ForeignKey(About , on_delete=models.CASCADE , related_name="school")
@@ -110,6 +116,7 @@ class School(models.Model):
     end_year = models.DateField(auto_now=False , auto_now_add=False)
     school_name = models.CharField(max_length=50 , default="")
     certificate_link = models.URLField(blank=True , default="")
+    description = models.CharField(max_length=ENTRY_DESCRIPTION_MAX , blank=True , default="")
 
     class Meta:
         verbose_name_plural = "Schools"
@@ -119,6 +126,7 @@ class Proficiency(models.Model):
     skill_name = models.CharField(max_length=50 , default="")
     skill_range = models.SmallIntegerField(validators=[ MinValueValidator(0) , MaxValueValidator(100)] , default=10)
     certificate_link = models.URLField(blank=True , default="")
+    description = models.CharField(max_length=ENTRY_DESCRIPTION_MAX , blank=True , default="")
 
     class Meta:
         verbose_name_plural = "Proficiency"
@@ -217,8 +225,37 @@ class Goal(models.Model):
         return f"{self.profile.user.username} - {self.title}"
 
 
+class Visitor(models.Model):
+    """
+    One anonymous browser, known only by a random id the browser made up for
+    itself. No IP address, user agent or any other personal data is stored.
+    visit_count counts visits (a return after SESSION_GAP of inactivity starts
+    a new one), not page views - so a returning person is one row whose count
+    goes up, never a second visitor.
+    """
+    visitor_id = models.UUIDField(unique=True , editable=False)
+    first_seen = models.DateTimeField(auto_now_add=True)
+    last_seen = models.DateTimeField()
+    visit_count = models.PositiveIntegerField(default=1)
+
+    class Meta:
+        ordering = ["-last_seen"]
+
+    def __str__(self):
+        return f"Visitor #{self.pk} ({self.visit_count} visits)"
 
 
+class PageView(models.Model):
+    """A portfolio (track=None means the landing page) a visitor opened during one of their visits."""
+    visitor = models.ForeignKey(Visitor , on_delete=models.CASCADE , related_name="views")
+    track = models.ForeignKey(PortfolioTrack , null=True , blank=True , on_delete=models.CASCADE , related_name="views")
+    visit_number = models.PositiveIntegerField()
+    created_at = models.DateTimeField(auto_now_add=True)
 
-
-
+    class Meta:
+        constraints = [
+            # one row per portfolio per visit; NULL track (landing) needs its own rule
+            models.UniqueConstraint(fields=["visitor" , "visit_number" , "track"] , name="one_view_per_track_per_visit"),
+            models.UniqueConstraint(fields=["visitor" , "visit_number"] , condition=models.Q(track__isnull=True) ,
+                                    name="one_landing_view_per_visit"),
+        ]
