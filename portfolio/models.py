@@ -40,6 +40,9 @@ class PortfolioTrack(models.Model):
     order = models.PositiveIntegerField(default=0)
 
     display_pic = models.URLField(default="" , blank=False)
+    # City / country line for this portfolio's resume. Kept out of
+    # TRACK_CONTACT_FIELDS because Profile has no such column to copy from.
+    location = models.CharField(max_length=80 , blank=True , default="")
     linkedin = models.URLField(default="" , blank=True)
     github = models.URLField(default="" , blank=True)
     whatapp = models.URLField(default="" , blank=True)
@@ -115,6 +118,9 @@ class School(models.Model):
     start_year = models.DateField(auto_now=False , auto_now_add=False)
     end_year = models.DateField(auto_now=False , auto_now_add=False)
     school_name = models.CharField(max_length=50 , default="")
+    # What was studied or earned, e.g. "B.Eng. Mechanical Engineering" - the line
+    # a resume (and an ATS) expects under the school name.
+    degree = models.CharField(max_length=100 , blank=True , default="")
     certificate_link = models.URLField(blank=True , default="")
     description = models.CharField(max_length=ENTRY_DESCRIPTION_MAX , blank=True , default="")
 

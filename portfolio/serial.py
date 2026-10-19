@@ -141,7 +141,7 @@ class PortfolioTrackSerial(ModelSerializer):
     class Meta:
         model = PortfolioTrack
         fields = ["id" , "name" , "slug" , "is_default" , "order" , "about" , "items" ,
-                  "username" , "copy_from" , "copy_portfolio_items"] + TRACK_CONTACT_FIELDS
+                  "username" , "copy_from" , "copy_portfolio_items" , "location"] + TRACK_CONTACT_FIELDS
         extra_kwargs = {"slug": {"required": False}}
 
     @transaction.atomic
@@ -168,6 +168,8 @@ class PortfolioTrackSerial(ModelSerializer):
         # independent of that origin from then on.
         origin = source or profile
         initial = {field: getattr(origin , field) for field in TRACK_CONTACT_FIELDS}
+        if source is not None:
+            initial["location"] = source.location
 
         validated_data.setdefault("slug" , _unique_slug(profile , validated_data["name"]))
         track = PortfolioTrack.objects.create(profile = profile , **{**initial , **validated_data})
@@ -189,8 +191,8 @@ class PortfolioTrackSerial(ModelSerializer):
                                        certificate_link = r.certificate_link , description = r.description)
             for s in source_about.school.all():
                 School.objects.create(about = new_about , start_year = s.start_year , end_year = s.end_year ,
-                                       school_name = s.school_name , certificate_link = s.certificate_link ,
-                                       description = s.description)
+                                       school_name = s.school_name , degree = s.degree ,
+                                       certificate_link = s.certificate_link , description = s.description)
             for p in source_about.proficiency.all():
                 Proficiency.objects.create(about = new_about , skill_name = p.skill_name ,
                                             skill_range = p.skill_range , certificate_link = p.certificate_link ,

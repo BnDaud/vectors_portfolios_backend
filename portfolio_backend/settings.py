@@ -78,6 +78,11 @@ WSGI_APPLICATION = "portfolio_backend.wsgi.application"
 CORS_ALLOW_ALL_ORIGINS = config("CORS_ALLOW_ALL_ORIGINS", default=False, cast=bool)
 CORS_ALLOWED_ORIGINS = config("CORS_ALLOWED_ORIGINS", default="http://localhost:5173", cast=Csv())
 CORS_ALLOW_CREDENTIALS = True
+# lets the site read the file name of a resume download
+CORS_EXPOSE_HEADERS = ["Content-Disposition"]
+
+# The public address of the site, used for the portfolio link printed on a resume.
+SITE_URL = config("SITE_URL", default="https://vectoredmatrix.vercel.app").rstrip("/")
 
 # Django's CSRF check validates the request's Origin header against this
 # list for any unsafe cross-origin request - separate from CORS_ALLOWED_ORIGINS,
@@ -108,6 +113,8 @@ REST_FRAMEWORK = {
         "password_change": "5/min",
         # per IP, for the public visitor beacon
         "visit": "120/hour",
+        # per IP, for the read-only resume viewer (a view loads one JSON + one image per page)
+        "resume_view": "240/hour",
     },
 }
 

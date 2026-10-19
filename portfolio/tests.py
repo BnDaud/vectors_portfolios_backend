@@ -1,5 +1,7 @@
 import importlib
-from datetime import date
+import io
+import json
+from datetime import date, timedelta
 from unittest import mock
 
 from django.apps import apps as django_apps
@@ -816,3 +818,295 @@ class VisitorAnalyticsTests(APITestCase):
         self.visit(vid, "full-stack")
         self.fs.delete()
         self.assertEqual((Visitor.objects.count(), PageView.objects.count()), (1, 0))
+
+
+# ---------------------------------------------------------------- resume ------
+
+import docx
+import pymupdf
+
+from portfolio import resume_builder
+
+TODAY = date(2026, 10, 18)
+
+
+def pdf_text(blob):
+    with pymupdf.open(stream=blob, filetype="pdf") as doc:
+        return "\n".join(page.get_text() for page in doc)
+
+
+@override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"], SITE_URL="https://site.example")
+class ResumeExportTests(APITestCase):
+    """One resume per portfolio: owner-only PDF and Word, and a public read-only
+    viewer that only ever hands out page images."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user("owner", password="Old-Passw0rd-xyz", first_name="Sulaimon", last_name="Lawal")
+        cls.profile = Profile.objects.create(user=cls.user, display_pic="https://img.example.com/p.png")
+        cls.fs = cls.make_track("Full Stack", "full-stack", skill="Full Stack Developer", email="fs@example.com",
+                                phone="+2348000000001", location="Abuja, Nigeria", years=4)
+        cls.cad = cls.make_track("CAD Engineer", "cad-engineer", skill="CAD Engineer", email="cad@example.com",
+                                 phone="+2348000000002", location="Kaduna, Nigeria", years=2)
+
+    @classmethod
+    def make_track(cls, name, slug, *, skill, email, phone, location, years):
+        track = PortfolioTrack.objects.create(
+            profile=cls.profile, name=name, slug=slug, display_pic="https://img.example.com/p.png",
+            email=email, phone_number=phone, location=location,
+            linkedin="https://www.linkedin.com/in/owner", github=f"https://github.com/owner-{slug}",
+        )
+        about = About.objects.create(track=track, skill=skill, description=f"Summary text for {name}.\nSecond line.",
+                                     experience_base_years=years)
+        return track
+
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient(HTTP_HOST="localhost")
+        self.client.force_authenticate(user=self.user)
+        about = self.fs.about
+        self.job_old = Resume.objects.create(about=about, post="Robotic Instructor", company_name="Al Izzah",
+                                             start_year=date(2022, 9, 12), end_year=date(2022, 10, 14),
+                                             description="Taught robotics basics.\n- Built line-following robots.")
+        self.job_now = Resume.objects.create(about=about, post="Full Stack Developer", company_name="Pio Tech",
+                                             start_year=date(2024, 8, 5), end_year=date.today() + timedelta(days=400),
+                                             description="Built web apps in Python and React.", certificate_link="https://c.example/job.png")
+        self.school = School.objects.create(about=about, school_name="Ahmadu Bello University", degree="B.Eng. Mechanical Engineering",
+                                            start_year=date(2020, 1, 6), end_year=date(2024, 10, 5))
+        for skill, rating in (("Rust", 87), ("Python", 78), ("C++", 52), ("C", 20)):
+            Proficiency.objects.create(about=about, skill_name=skill, skill_range=rating)
+        Portfolio.objects.create(track=self.fs, category="WebDev", name="Shop", thumbnail="https://a.com/t.png", project_link="https://shop.example.com")
+        Proficiency.objects.create(about=self.cad.about, skill_name="Solid Works", skill_range=70)
+        Resume.objects.create(about=self.cad.about, post="Draftsman", company_name="Drawing Co",
+                              start_year=date(2023, 1, 2), end_year=date(2023, 6, 30), description="Drew parts.")
+
+    def url(self, slug, tail):
+        return f"{API}/resume-export/{slug}/{tail}"
+
+    def pdf(self, slug="full-stack"):
+        res = self.client.get(self.url(slug, "download/pdf"))
+        self.assertEqual(res.status_code, 200, res.content[:200])
+        return res
+
+    # --- who can download ------------------------------------------------------
+
+    def test_only_the_owner_can_download(self):
+        anon = APIClient(HTTP_HOST="localhost")
+        for kind in ("pdf", "docx"):
+            self.assertIn(anon.get(self.url("full-stack", f"download/{kind}")).status_code, (401, 403), kind)
+        self.assertEqual(self.client.get(self.url("full-stack", "download/pdf")).status_code, 200)
+
+    def test_unknown_portfolio_and_format(self):
+        self.assertEqual(self.client.get(self.url("nope", "download/pdf")).status_code, 404)
+        self.assertEqual(self.client.get(self.url("full-stack", "download/exe")).status_code, 404)
+        self.assertEqual(APIClient(HTTP_HOST="localhost").get(self.url("nope", "pages")).status_code, 404)
+
+    def test_headers_and_file_names(self):
+        res = self.pdf()
+        self.assertEqual(res["Content-Type"], "application/pdf")
+        self.assertEqual(res["Content-Disposition"], 'attachment; filename="Sulaimon_Lawal_Full_Stack_Resume.pdf"')
+        self.assertEqual(res["Cache-Control"], "no-store")
+        self.assertTrue(res.content.startswith(b"%PDF"))
+        word = self.client.get(self.url("cad-engineer", "download/docx"))
+        self.assertEqual(word["Content-Disposition"], 'attachment; filename="Sulaimon_Lawal_CAD_Engineer_Resume.docx"')
+        self.assertIn("wordprocessingml", word["Content-Type"])
+
+    def test_file_name_is_reduced_to_safe_characters(self):
+        self.fs.name = 'Full "Stack"/../x;\r\ny'
+        self.fs.save()
+        disposition = self.pdf()["Content-Disposition"]
+        self.assertRegex(disposition, r'^attachment; filename="[A-Za-z0-9_]+\.pdf"$')
+
+    def test_the_browser_may_read_the_file_name(self):
+        from django.conf import settings
+        self.assertIn("Content-Disposition", settings.CORS_EXPOSE_HEADERS)
+
+    # --- the PDF is ATS-friendly -------------------------------------------------
+
+    def test_pdf_has_the_right_content_in_reading_order(self):
+        text = pdf_text(self.pdf().content)
+        for needle in ("Sulaimon Lawal", "Full Stack Developer | 4+ years of experience", "fs@example.com",
+                       "+2348000000001", "Abuja, Nigeria", "https://site.example/full-stack",
+                       "https://github.com/owner-full-stack", "Summary text for Full Stack."):
+            self.assertIn(needle, text, needle)
+        order = [text.index(h) for h in ("PROFESSIONAL SUMMARY", "SKILLS", "PROFESSIONAL EXPERIENCE", "EDUCATION", "PROJECTS", "CERTIFICATES")]
+        self.assertEqual(order, sorted(order), "standard section headings, in the usual order")
+        self.assertLess(text.index("Sulaimon Lawal"), text.index("PROFESSIONAL SUMMARY"))
+
+    def test_pdf_experience_dates_bullets_and_newest_first(self):
+        text = pdf_text(self.pdf().content)
+        self.assertLess(text.index("Full Stack Developer | Pio Tech"), text.index("Robotic Instructor | Al Izzah"))
+        self.assertIn("09/2022 \u2013 10/2022", text)
+        self.assertIn("08/2024 \u2013 Present", text, "an end date still ahead reads Present")
+        self.assertIn("Built line-following robots.", text)
+        self.assertIn("\u2022", text)
+
+    def test_pdf_education_skills_projects_certificates(self):
+        text = pdf_text(self.pdf().content)
+        self.assertIn("B.Eng. Mechanical Engineering | Ahmadu Bello University", text)
+        self.assertIn("2020 \u2013 2024", text)
+        for line in ("Expert: Rust", "Advanced: Python", "Intermediate: C++", "Beginner: C"):
+            self.assertIn(line, text, line)
+        self.assertLess(text.index("Expert: Rust"), text.index("Advanced: Python"))
+        self.assertIn("Shop (WebDev): https://shop.example.com", text)
+        self.assertIn("Full Stack Developer, Pio Tech: https://c.example/job.png", text)
+
+    def test_pdf_is_plain_enough_for_an_ats(self):
+        with pymupdf.open(stream=self.pdf().content, filetype="pdf") as doc:
+            self.assertEqual(doc.metadata["title"], "Sulaimon Lawal - Resume")
+            self.assertEqual(doc.metadata["author"], "Sulaimon Lawal")
+            fonts = set()
+            for page in doc:
+                self.assertEqual(page.get_images(), [], "no pictures: nothing for a parser to trip on")
+                self.assertEqual(page.find_tables().tables, [], "no tables")
+                fonts |= {f[3] for f in page.get_fonts()}
+                lefts = [round(b[0]) for b in page.get_text("blocks") if b[4].strip()]
+                self.assertLess(max(lefts) - min(lefts), 30, "a single column: every block starts at the left margin")
+            self.assertTrue(fonts and all("Helvetica" in f for f in fonts), fonts)
+            self.assertTrue(doc[0].get_text().strip(), "real, selectable text")
+            self.assertTrue(any(link["kind"] == pymupdf.LINK_URI for link in doc[0].get_links()), "links stay clickable")
+
+    def test_pdf_survives_awkward_text(self):
+        self.job_now.description = "R&D <b>lead</b> \u2013 caf\u00e9 \u1ecc l\u00e1 \u201cquoted\u201d \u4e2d\u6587"
+        self.job_now.save()
+        self.user.last_name = "\u1ecc l\u00e1d\u00e9j\u00ed"
+        self.user.save()
+        text = pdf_text(self.pdf().content)
+        self.assertIn("R&D <b>lead</b>", text, "markup in the text is shown literally, not interpreted")
+        self.assertIn("caf\u00e9", text)
+        self.assertIn("Sulaimon", text)
+
+    def test_empty_portfolio_still_makes_a_valid_resume(self):
+        blank = PortfolioTrack.objects.create(profile=self.profile, name="Blank", slug="blank", display_pic="https://img.example.com/p.png")
+        About.objects.create(track=blank, skill="", description="")
+        text = pdf_text(self.client.get(self.url("blank", "download/pdf")).content)
+        self.assertIn("Sulaimon Lawal", text)
+        for heading in ("PROFESSIONAL EXPERIENCE", "EDUCATION", "SKILLS", "PROJECTS", "CERTIFICATES", "PROFESSIONAL SUMMARY"):
+            self.assertNotIn(heading, text, "empty sections are left out")
+        self.assertEqual(self.client.get(self.url("blank", "download/docx")).status_code, 200)
+
+    def test_a_long_resume_runs_onto_more_pages(self):
+        for i in range(60):
+            Resume.objects.create(about=self.fs.about, post=f"Role {i}", company_name=f"Company {i}", start_year=date(2010, 1, 1),
+                                  end_year=date(2011, 1, 1), description="Did a thing.\nDid another thing.")
+        with pymupdf.open(stream=self.pdf().content, filetype="pdf") as doc:
+            self.assertGreater(len(doc), 2)
+            self.assertIn("Role 59", "".join(p.get_text() for p in doc))
+
+    # --- Word ---------------------------------------------------------------------
+
+    def test_word_file_uses_real_headings_and_bullets(self):
+        res = self.client.get(self.url("full-stack", "download/docx"))
+        document = docx.Document(io.BytesIO(res.content))
+        headings = [p.text for p in document.paragraphs if p.style.name == "Heading 1"]
+        self.assertEqual(headings, ["PROFESSIONAL SUMMARY", "SKILLS", "PROFESSIONAL EXPERIENCE", "EDUCATION", "PROJECTS", "CERTIFICATES"])
+        bullets = [p.text for p in document.paragraphs if p.style.name == "List Bullet"]
+        self.assertIn("Built line-following robots.", bullets)
+        text = "\n".join(p.text for p in document.paragraphs)
+        for needle in ("Sulaimon Lawal", "fs@example.com", "+2348000000001", "Abuja, Nigeria", "08/2024 \u2013 Present",
+                       "B.Eng. Mechanical Engineering | Ahmadu Bello University", "Expert: Rust"):
+            self.assertIn(needle, text, needle)
+        self.assertEqual(document.core_properties.title, "Sulaimon Lawal - Resume")
+        self.assertEqual(len(document.tables), 0, "no tables")
+        self.assertTrue(any("hyperlink" in p._p.xml for p in document.paragraphs), "links are real hyperlinks")
+
+    # --- one resume per portfolio -----------------------------------------------------
+
+    def test_each_portfolio_gets_its_own_resume(self):
+        fs, cad = pdf_text(self.pdf("full-stack").content), pdf_text(self.pdf("cad-engineer").content)
+        self.assertIn("fs@example.com", fs); self.assertNotIn("cad@example.com", fs)
+        self.assertIn("cad@example.com", cad); self.assertNotIn("fs@example.com", cad)
+        self.assertIn("Kaduna, Nigeria", cad); self.assertNotIn("Abuja", cad)
+        self.assertIn("CAD Engineer | 2+ years of experience", cad)
+        self.assertIn("Draftsman | Drawing Co", cad); self.assertNotIn("Draftsman", fs)
+        self.assertIn("Solid Works", cad); self.assertNotIn("Rust", cad)
+        self.assertIn("https://site.example/cad-engineer", cad)
+
+    def test_editing_a_portfolio_changes_its_resume_and_not_the_other(self):
+        before = self.pdf("full-stack").content
+        other = self.pdf("cad-engineer").content
+        self.client.patch(f"{API}/tracks/{self.fs.id}", {"email": "new@example.com", "location": "Lagos, Nigeria"}, format="json")
+        after = pdf_text(self.pdf("full-stack").content)
+        self.assertIn("new@example.com", after); self.assertIn("Lagos, Nigeria", after)
+        self.assertNotEqual(before, self.pdf("full-stack").content)
+        self.assertEqual(pdf_text(other), pdf_text(self.pdf("cad-engineer").content))
+
+    def test_results_are_cached_until_the_content_changes(self):
+        with mock.patch.object(resume_builder, "render_pdf", wraps=resume_builder.render_pdf) as render:
+            self.pdf(); self.pdf(); self.pdf()
+            self.assertEqual(render.call_count, 1)
+            Proficiency.objects.create(about=self.fs.about, skill_name="Go", skill_range=65)
+            self.assertIn("Go", pdf_text(self.pdf().content))
+            self.assertEqual(render.call_count, 2)
+
+    # --- the public read-only viewer --------------------------------------------------
+
+    def test_viewer_is_public_and_serves_page_images_only(self):
+        anon = APIClient(HTTP_HOST="localhost")
+        info = anon.get(self.url("full-stack", "pages")).json()
+        self.assertEqual((info["name"], info["portfolio"]), ("Sulaimon Lawal", "Full Stack"))
+        self.assertGreaterEqual(info["pages"], 1)
+        image = anon.get(self.url("full-stack", "pages/1.png"))
+        self.assertEqual(image.status_code, 200)
+        self.assertEqual(image["Content-Type"], "image/png")
+        self.assertTrue(image.content.startswith(b"\x89PNG"))
+        self.assertEqual(image["Cache-Control"], "no-store")
+        self.assertEqual(anon.get(self.url("full-stack", f"pages/{info['pages'] + 1}.png")).status_code, 404)
+        self.assertEqual(anon.get(self.url("full-stack", "pages/0.png")).status_code, 404)
+
+    def test_viewer_pages_are_pictures_with_no_text_to_copy(self):
+        blob = APIClient(HTTP_HOST="localhost").get(self.url("full-stack", "pages/1.png")).content
+        self.assertEqual(pymupdf.open(stream=blob, filetype="png").page_count, 1)
+        with pymupdf.open(stream=blob, filetype="png") as picture:
+            self.assertEqual(picture[0].get_text().strip(), "", "an image has no text layer")
+
+    def test_viewer_differs_per_portfolio(self):
+        anon = APIClient(HTTP_HOST="localhost")
+        self.assertNotEqual(anon.get(self.url("full-stack", "pages/1.png")).content, anon.get(self.url("cad-engineer", "pages/1.png")).content)
+
+    def test_viewer_is_rate_limited(self):
+        with mock.patch.dict(ScopedRateThrottle.THROTTLE_RATES, {"resume_view": "3/hour"}):
+            anon = APIClient(HTTP_HOST="localhost")
+            codes = [anon.get(self.url("full-stack", "pages")).status_code for _ in range(5)]
+        self.assertEqual(codes, [200, 200, 200, 429, 429])
+
+    def test_viewer_cannot_be_used_to_get_the_files(self):
+        anon = APIClient(HTTP_HOST="localhost")
+        self.assertIn(anon.get(self.url("full-stack", "download/pdf")).status_code, (401, 403))
+        self.assertEqual(anon.get(self.url("full-stack", "pages/1.pdf")).status_code, 404)
+
+    # --- ongoing / completed follow the date --------------------------------------------
+
+    def test_present_follows_the_date(self):
+        with mock.patch("portfolio.resume_builder.date") as fake:
+            fake.today.return_value = date(2030, 1, 1)         # long after the job's end date
+            data = resume_builder.collect(self.fs, "https://site.example")
+        self.assertNotIn("Present", json.dumps(data["experience"]))
+        self.assertEqual(data["experience"][0]["period"].split(" \u2013 ")[1][-4:].isdigit(), True)
+        data = resume_builder.collect(self.fs, "https://site.example")
+        self.assertIn("Present", json.dumps(data["experience"]))
+
+    def test_levels_match_the_website_bands(self):
+        for rating, label in ((0, "Beginner"), (34, "Beginner"), (35, "Intermediate"), (59, "Intermediate"),
+                              (60, "Advanced"), (79, "Advanced"), (80, "Expert"), (100, "Expert")):
+            self.assertEqual(resume_builder.level_for(rating), label, rating)
+
+    # --- the new fields --------------------------------------------------------------------
+
+    def test_location_and_degree_are_validated_and_saved(self):
+        ok = self.client.patch(f"{API}/tracks/{self.fs.id}", {"location": "Abuja, Nigeria"}, format="json")
+        self.assertEqual(ok.status_code, 200, ok.content)
+        self.assertEqual(self.client.patch(f"{API}/tracks/{self.fs.id}", {"location": "x" * 81}, format="json").status_code, 400)
+        self.assertEqual(self.client.patch(f"{API}/school/{self.school.id}", {"degree": "B.Sc."}, format="json").status_code, 200)
+        self.assertEqual(self.client.patch(f"{API}/school/{self.school.id}", {"degree": "x" * 101}, format="json").status_code, 400)
+        self.assertEqual(self.client.patch(f"{API}/school/{self.school.id}", {"degree": ""}, format="json").status_code, 200)
+
+    def test_duplicate_copies_location_and_degree(self):
+        res = self.client.post(f"{API}/tracks/", {"username": "owner", "name": "Copy", "copy_from": self.fs.id}, format="json")
+        self.assertEqual(res.status_code, 201, res.content)
+        copy = PortfolioTrack.objects.get(pk=res.json()["id"])
+        self.assertEqual(copy.location, "Abuja, Nigeria")
+        self.assertEqual(copy.about.school.get().degree, "B.Eng. Mechanical Engineering")
+        self.client.patch(f"{API}/tracks/{copy.id}", {"location": "Elsewhere"}, format="json")
+        self.fs.refresh_from_db()
+        self.assertEqual(self.fs.location, "Abuja, Nigeria")
