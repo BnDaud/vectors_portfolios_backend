@@ -2,9 +2,10 @@ from django.shortcuts import render
 from django.utils import timezone
 from rest_framework.reverse import reverse
 from rest_framework import generics
+from rest_framework.exceptions import ValidationError
 from .models import Profile , Portfolio , About ,Resume ,School ,Proficiency , PortfolioTrack , Goal
 from rest_framework.response import Response
-from . serial import Profileserial ,Userserial , PortfolioSerial ,AboutSerial ,ResumeSerial , SchoolSerial ,ProficiencySerial , PortfolioTrackSerial , GoalSerial
+from . serial import Profileserial ,Userserial , PortfolioSerial ,AboutSerial ,ResumeSerial , SchoolSerial ,ProficiencySerial , PortfolioTrackSerial , GoalSerial , delete_if_in_no_portfolio
 from django.contrib.auth.models import User
 
 # Create your views here.
@@ -95,6 +96,41 @@ class updateportfolio(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = PortfolioSerial
     queryset = Portfolio.objects.all()
     name  = "update_portfolio"
+
+    def update(self , request , *args , **kwargs):
+        instance = self.get_object()
+        serializer = self.get_serializer(instance , data = request.data , partial = kwargs.pop("partial" , False))
+        serializer.is_valid(raise_exception = True)
+        project = serializer.save()
+        if project.pk is None:      # it was unticked in every portfolio, so it was deleted
+            return Response(status = 204)
+        return Response(serializer.data)
+
+    def destroy(self , request , *args , **kwargs):
+        """
+        DELETE ?from=<portfolio id>[&also=<id>,<id>... | all]
+        Takes the project out of that portfolio and nothing else - unless more are named in
+        `also` (or "all" of them). Once no portfolio shows it any more, it is deleted for good.
+        """
+        project = self.get_object()
+        shown_in = set(project.tracks.values_list("id" , flat = True))
+        source = request.query_params.get("from")
+        if source is None:
+            if len(shown_in) > 1:
+                raise ValidationError({"from": "This project is shown in several portfolios - say which one to delete it from."})
+            remove = set(shown_in)
+        else:
+            also = request.query_params.get("also" , "")
+            try:
+                remove = {int(source)} | (set(shown_in) if also == "all" else {int(i) for i in also.split(",") if i})
+            except ValueError:
+                raise ValidationError({"also": "Use portfolio ids separated by commas, or \"all\"."})
+            unknown = remove - shown_in
+            if unknown:
+                raise ValidationError({"from": f"This project is not shown in portfolio {sorted(unknown)[0]}."})
+        project.tracks.remove(*remove)
+        delete_if_in_no_portfolio(project)
+        return Response(status = 204)
 
 
 class list_resume(generics.ListCreateAPIView):

@@ -15,7 +15,11 @@ class display_about(admin.ModelAdmin):
 
 
 class display_portfolio(admin.ModelAdmin):
-    list_display = ["track" , "category"]
+    list_display = ["name" , "category" , "shown_in"]
+
+    @admin.display(description="Shown in")
+    def shown_in(self , obj):
+        return ", ".join(track.name for track in obj.tracks.all())
 
 
 class display_resume(admin.ModelAdmin):

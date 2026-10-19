@@ -1,5 +1,7 @@
 from datetime import date
 from django.db import models
+from django.db.models.signals import post_delete
+from django.dispatch import receiver
 from django.utils import timezone
 from django.contrib.auth.models import User
 from django.core.validators import MinValueValidator, MaxValueValidator
@@ -205,7 +207,9 @@ class Portfolio(models.Model):
 
 
 
-    track = models.ForeignKey(PortfolioTrack , on_delete=models.CASCADE , related_name="items")
+    # One project, shown in as many portfolios as it is ticked for: editing it changes it everywhere and
+    # taking it out of one portfolio leaves the others alone. Taken out of the last one, it is deleted.
+    tracks = models.ManyToManyField(PortfolioTrack , related_name="items")
     category = models.CharField(choices = portfolio_choice , max_length= 50)
     name = models.CharField(blank=False , max_length=50 , default="")
     thumbnail = models.URLField(blank=False , default= "")
@@ -215,7 +219,7 @@ class Portfolio(models.Model):
 
 
     def __str__(self):
-        return self.track.profile.user.username + " Portfolio"
+        return f"{self.name} ({', '.join(track.name for track in self.tracks.all())})"
 
 
 class Goal(models.Model):
@@ -284,3 +288,9 @@ class ResumeView(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
+
+
+@receiver(post_delete, sender=PortfolioTrack)
+def drop_projects_left_in_no_portfolio(sender , **kwargs):
+    """Deleting a portfolio takes its own projects with it - but not the ones other portfolios also show."""
+    Portfolio.objects.filter(tracks__isnull=True).delete()

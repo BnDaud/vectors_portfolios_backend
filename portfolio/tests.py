@@ -10,7 +10,7 @@ from django.contrib.auth.models import User
 from django.core.cache import cache
 from django.core.management import call_command
 from io import StringIO
-from django.test import SimpleTestCase, override_settings
+from django.test import SimpleTestCase, TransactionTestCase, override_settings
 import uuid
 from datetime import timedelta
 from django.utils import timezone
@@ -23,6 +23,13 @@ from .models import (
 )
 
 API = "/api_root"
+
+
+def make_project(track, **fields):
+    """A project shown in `track` (more portfolios can be added with .tracks.add)."""
+    project = Portfolio.objects.create(**fields)
+    project.tracks.add(track)
+    return project
 
 
 class TrackIndependenceTests(APITestCase):
@@ -60,7 +67,7 @@ class TrackIndependenceTests(APITestCase):
         School.objects.create(about=about, school_name="Uni", start_year=date(2018, 1, 1),
                               end_year=date(2022, 1, 1))
         Proficiency.objects.create(about=about, skill_name="Python", skill_range=80)
-        Portfolio.objects.create(track=track, category="WebDev", name="Site",
+        make_project(track, category="WebDev", name="Site",
                                  thumbnail="https://a.com/t.png", project_link="https://a.com")
         return track
 
@@ -919,6 +926,271 @@ class VisitorAnalyticsTests(APITestCase):
         self.assertIn(self.browser().get(self.summary).status_code, (401, 403))
 
 
+class ProjectSharingTests(APITestCase):
+    """One project can be shown in several portfolios: edited once, removed per portfolio,
+    and deleted for good only when no portfolio shows it any more."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user("owner", password="Old-Passw0rd-xyz")
+        cls.profile = Profile.objects.create(user=cls.user, display_pic="https://img.example.com/p.png")
+        cls.a, cls.b, cls.c = (PortfolioTrack.objects.create(profile=cls.profile, name=n, slug=s, display_pic="https://img.example.com/p.png")
+                               for n, s in (("Alpha", "alpha"), ("Beta", "beta"), ("Gamma", "gamma")))
+        for track in (cls.a, cls.b, cls.c):
+            About.objects.create(track=track, skill="Skill", description="About")
+        other = User.objects.create_user("stranger", password="Old-Passw0rd-xyz")
+        cls.stranger_track = PortfolioTrack.objects.create(profile=Profile.objects.create(user=other, display_pic="https://img.example.com/s.png"),
+                                                           name="Theirs", slug="theirs", display_pic="https://img.example.com/s.png")
+
+    def setUp(self):
+        self.client = APIClient(HTTP_HOST="localhost")
+        self.client.force_authenticate(user=self.user)
+
+    def body(self, **extra):
+        return {"track": self.a.id, "category": "WebDev", "name": "Demo", "thumbnail": "https://a.com/t.png",
+                "project_link": "https://demo.example.com", **extra}
+
+    def add(self, **extra):
+        res = self.client.post(f"{API}/portfolio/", self.body(**extra), format="json")
+        self.assertEqual(res.status_code, 201, res.content)
+        return Portfolio.objects.get(pk=res.json()["id"])
+
+    def shown_in(self, project):
+        return sorted(project.tracks.values_list("name", flat=True))
+
+    def listed(self, track):
+        tracks = APIClient(HTTP_HOST="localhost").get(f"{API}/tracks/?username=owner").json()
+        return sorted(i["name"] for i in next(t for t in tracks if t["id"] == track.id)["items"])
+
+    # --- adding -----------------------------------------------------------------------------
+
+    def test_a_new_project_is_shown_only_where_it_was_posted_by_default(self):
+        project = self.add()
+        self.assertEqual(self.shown_in(project), ["Alpha"])
+        self.assertEqual((self.listed(self.a), self.listed(self.b), self.listed(self.c)), (["Demo"], [], []))
+
+    def test_it_can_be_shared_with_chosen_portfolios(self):
+        project = self.add(share_with=[self.c.id])
+        self.assertEqual(self.shown_in(project), ["Alpha", "Gamma"])
+        self.assertEqual((self.listed(self.a), self.listed(self.b), self.listed(self.c)), (["Demo"], [], ["Demo"]))
+
+    def test_share_with_all_means_every_portfolio_of_the_owner(self):
+        project = self.add(share_with="all")
+        self.assertEqual(self.shown_in(project), ["Alpha", "Beta", "Gamma"])
+        self.assertEqual(self.stranger_track.items.count(), 0, "never another owner's portfolio")
+
+    def test_it_is_one_record_whichever_portfolios_show_it(self):
+        self.add(share_with=[self.b.id, self.c.id])
+        self.assertEqual(Portfolio.objects.count(), 1)
+
+    def test_sharing_is_validated(self):
+        for bad, field in (([9999], "share_with"), ("everything", "share_with"), ([True], "share_with"), (["1"], "share_with"),
+                           ([self.stranger_track.id], "tracks")):
+            res = self.client.post(f"{API}/portfolio/", self.body(share_with=bad), format="json")
+            self.assertEqual(res.status_code, 400, bad)
+            self.assertIn(field, res.json(), bad)
+        self.assertEqual(Portfolio.objects.count(), 0, "nothing half-created")
+        res = self.client.post(f"{API}/portfolio/", {**self.body(), "track": None}, format="json")
+        self.assertEqual(res.status_code, 400)
+        res = self.client.post(f"{API}/portfolio/", {k: v for k, v in self.body().items() if k != "track"}, format="json")
+        self.assertEqual(res.status_code, 400, "it has to say where it goes")
+        self.assertEqual(self.client.post(f"{API}/portfolio/", self.body(track=self.stranger_track.id, share_with=[self.a.id]), format="json").status_code, 400)
+
+    def test_the_old_way_of_adding_still_works_and_listing_the_portfolios_directly_does_too(self):
+        res = self.client.post(f"{API}/portfolio/", {k: v for k, v in self.body().items() if k != "track"} | {"tracks": [self.b.id, self.c.id]}, format="json")
+        self.assertEqual(res.status_code, 201, res.content)
+        self.assertEqual(sorted(res.json()["tracks"]), sorted([self.b.id, self.c.id]))
+
+    def test_the_payload_says_where_each_project_is_shown(self):
+        project = self.add(share_with=[self.b.id])
+        tracks = APIClient(HTTP_HOST="localhost").get(f"{API}/tracks/?username=owner").json()
+        item = next(i for t in tracks if t["id"] == self.b.id for i in t["items"])
+        self.assertEqual(sorted(item["tracks"]), sorted([self.a.id, self.b.id]))
+        self.assertEqual(item["display_username"], "owner")
+        self.assertEqual(item["id"], project.id)
+
+    # --- editing ---------------------------------------------------------------------------------
+
+    def test_editing_a_shared_project_changes_it_everywhere(self):
+        project = self.add(share_with="all")
+        self.client.patch(f"{API}/portfolio/{project.id}", {"name": "Renamed", "description": "New words."}, format="json")
+        self.assertEqual((self.listed(self.a), self.listed(self.b), self.listed(self.c)), (["Renamed"],) * 3)
+        project.refresh_from_db()
+        self.assertEqual(project.description, "New words.")
+        self.assertEqual(self.shown_in(project), ["Alpha", "Beta", "Gamma"], "editing the words leaves the sharing alone")
+
+    def test_a_project_added_to_one_portfolio_can_be_added_to_another_later_without_retyping(self):
+        project = self.add()
+        res = self.client.patch(f"{API}/portfolio/{project.id}", {"tracks": [self.a.id, self.b.id]}, format="json")
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertEqual(sorted(res.json()["tracks"]), sorted([self.a.id, self.b.id]))
+        self.assertEqual(self.listed(self.b), ["Demo"])
+        self.assertEqual(Portfolio.objects.count(), 1, "the same project, not a copy")
+
+    def test_unticking_one_portfolio_leaves_the_others_showing_it(self):
+        project = self.add(share_with=[self.b.id, self.c.id])
+        res = self.client.patch(f"{API}/portfolio/{project.id}", {"tracks": [self.a.id, self.c.id]}, format="json")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual((self.listed(self.a), self.listed(self.b), self.listed(self.c)), (["Demo"], [], ["Demo"]))
+        self.assertTrue(Portfolio.objects.filter(pk=project.pk).exists())
+
+    def test_unticking_every_portfolio_deletes_the_project(self):
+        project = self.add(share_with=[self.b.id])
+        self.client.patch(f"{API}/portfolio/{project.id}", {"tracks": [self.b.id]}, format="json")
+        self.assertTrue(Portfolio.objects.filter(pk=project.pk).exists(), "still shown in Beta")
+        res = self.client.patch(f"{API}/portfolio/{project.id}", {"tracks": []}, format="json")
+        self.assertEqual(res.status_code, 204)
+        self.assertFalse(Portfolio.objects.filter(pk=project.pk).exists())
+        self.assertEqual(self.client.get(f"{API}/portfolio/{project.id}").status_code, 404)
+
+    def test_swapping_portfolios_in_one_save_never_loses_the_project(self):
+        project = self.add()
+        res = self.client.patch(f"{API}/portfolio/{project.id}", {"tracks": [self.b.id]}, format="json")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(self.shown_in(Portfolio.objects.get(pk=project.pk)), ["Beta"])
+
+    def test_sharing_with_another_owner_is_refused_on_edit(self):
+        project = self.add()
+        res = self.client.patch(f"{API}/portfolio/{project.id}", {"tracks": [self.a.id, self.stranger_track.id]}, format="json")
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(self.shown_in(project), ["Alpha"])
+        self.assertEqual(self.client.patch(f"{API}/portfolio/{project.id}", {"tracks": [9999]}, format="json").status_code, 400)
+
+    def test_anonymous_visitors_cannot_change_who_shows_a_project(self):
+        project = self.add()
+        anon = APIClient(HTTP_HOST="localhost")
+        self.assertIn(anon.patch(f"{API}/portfolio/{project.id}", {"tracks": [self.b.id]}, format="json").status_code, (401, 403))
+        self.assertIn(anon.delete(f"{API}/portfolio/{project.id}?from={self.a.id}").status_code, (401, 403))
+        self.assertIn(anon.post(f"{API}/portfolio/", self.body(share_with="all"), format="json").status_code, (401, 403))
+        self.assertEqual(self.shown_in(project), ["Alpha"])
+
+    # --- deleting --------------------------------------------------------------------------------
+
+    def delete(self, project, **query):
+        qs = "&".join(f"{k}={v}" for k, v in query.items())
+        return self.client.delete(f"{API}/portfolio/{project.id}" + (f"?{qs}" if qs else ""))
+
+    def test_deleting_from_one_portfolio_leaves_the_others(self):
+        project = self.add(share_with="all")
+        self.assertEqual(self.delete(project, **{"from": self.a.id}).status_code, 204)
+        self.assertEqual((self.listed(self.a), self.listed(self.b), self.listed(self.c)), ([], ["Demo"], ["Demo"]))
+        self.assertTrue(Portfolio.objects.filter(pk=project.pk).exists())
+
+    def test_deleting_can_also_remove_it_from_chosen_portfolios(self):
+        project = self.add(share_with="all")
+        self.assertEqual(self.delete(project, **{"from": self.a.id, "also": self.c.id}).status_code, 204)
+        self.assertEqual((self.listed(self.a), self.listed(self.b), self.listed(self.c)), ([], ["Demo"], []))
+
+    def test_deleting_from_every_portfolio_deletes_it_for_good(self):
+        project = self.add(share_with="all")
+        self.assertEqual(self.delete(project, **{"from": self.b.id, "also": "all"}).status_code, 204)
+        self.assertFalse(Portfolio.objects.filter(pk=project.pk).exists())
+        again = self.add(share_with=[self.b.id])
+        self.delete(again, **{"from": self.a.id})
+        self.assertTrue(Portfolio.objects.filter(pk=again.pk).exists())
+        self.delete(again, **{"from": self.b.id})
+        self.assertFalse(Portfolio.objects.filter(pk=again.pk).exists(), "removed from the last portfolio: gone")
+
+    def test_a_shared_project_cannot_be_deleted_without_saying_from_where(self):
+        project = self.add(share_with="all")
+        res = self.delete(project)
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("from", res.json())
+        self.assertEqual(self.shown_in(project), ["Alpha", "Beta", "Gamma"], "nothing was removed")
+
+    def test_a_project_in_one_portfolio_can_be_deleted_either_way(self):
+        one, two = self.add(), self.add(name="Other")
+        self.assertEqual(self.delete(one).status_code, 204)
+        self.assertEqual(self.delete(two, **{"from": self.a.id}).status_code, 204)
+        self.assertEqual(Portfolio.objects.count(), 0)
+
+    def test_bad_delete_requests_change_nothing(self):
+        project = self.add(share_with=[self.b.id])
+        for query in ({"from": self.c.id}, {"from": self.a.id, "also": self.c.id}, {"from": "x"}, {"from": self.a.id, "also": "1,x"}):
+            self.assertEqual(self.delete(project, **query).status_code, 400, query)
+        self.assertEqual(self.shown_in(project), ["Alpha", "Beta"])
+
+    # --- deleting a whole portfolio -----------------------------------------------------------------
+
+    def test_deleting_a_portfolio_keeps_the_projects_other_portfolios_show(self):
+        shared, only_alpha = self.add(share_with=[self.b.id]), self.add(name="Only Alpha")
+        self.assertEqual(self.client.delete(f"{API}/tracks/{self.a.id}").status_code, 204)
+        self.assertTrue(Portfolio.objects.filter(pk=shared.pk).exists())
+        self.assertFalse(Portfolio.objects.filter(pk=only_alpha.pk).exists(), "it was shown nowhere else")
+        self.assertEqual(self.listed(self.b), ["Demo"])
+        self.assertEqual(Portfolio.objects.count(), 1)
+
+    # --- copying a whole portfolio ------------------------------------------------------------------
+
+    def test_duplicating_a_portfolio_copies_the_projects_so_they_stand_alone(self):
+        project = self.add(share_with=[self.b.id])
+        res = self.client.post(f"{API}/tracks/", {"username": "owner", "name": "Copy", "copy_from": self.a.id, "copy_portfolio_items": True}, format="json")
+        self.assertEqual(res.status_code, 201, res.content)
+        copy = PortfolioTrack.objects.get(pk=res.json()["id"])
+        self.assertEqual(copy.items.count(), 1)
+        self.assertEqual(Portfolio.objects.count(), 2)
+        self.client.patch(f"{API}/portfolio/{copy.items.get().id}", {"name": "Changed in the copy"}, format="json")
+        project.refresh_from_db()
+        self.assertEqual(project.name, "Demo")
+
+    # --- the resume -------------------------------------------------------------------------------------
+
+    @override_settings(SITE_URL="https://site.example")
+    def test_a_shared_project_is_on_every_portfolios_resume_and_follows_the_ticks(self):
+        project = self.add(share_with=[self.b.id], description="Shared words.")
+        for track in (self.a, self.b):
+            data = resume_builder.collect(track, "https://site.example")
+            self.assertEqual([p["name"] for p in data["projects"]], ["Demo"], track.name)
+            self.assertEqual(data["projects"][0]["description"], "Shared words.")
+        self.assertEqual(resume_builder.collect(self.c, "https://site.example")["projects"], [])
+        self.client.patch(f"{API}/portfolio/{project.id}", {"tracks": [self.a.id]}, format="json")
+        self.assertEqual(resume_builder.collect(self.b, "https://site.example")["projects"], [])
+        self.client.patch(f"{API}/portfolio/{project.id}", {"description": "Edited."}, format="json")
+        self.assertEqual(resume_builder.collect(self.a, "https://site.example")["projects"][0]["description"], "Edited.")
+
+    @override_settings(SITE_URL="https://site.example")
+    def test_the_five_most_recent_rule_counts_shared_projects_like_any_other(self):
+        for i in range(6):
+            self.add(name=f"P{i}", share_with=[self.b.id] if i % 2 == 0 else None)
+        self.assertEqual([p["name"] for p in resume_builder.collect(self.a, "https://site.example")["projects"]], ["P5", "P4", "P3", "P2", "P1"])
+        self.assertEqual([p["name"] for p in resume_builder.collect(self.b, "https://site.example")["projects"]], ["P4", "P2", "P0"])
+
+
+class ProjectSharingMigrationTests(TransactionTestCase):
+    """Projects that exist before sharing keep showing in their portfolio, and the change can be undone."""
+
+    def test_existing_projects_move_to_the_new_link_and_back(self):
+        from django.db import connection
+        from django.db.migrations.executor import MigrationExecutor
+        before, after = [("portfolio", "0019_project_description")], [("portfolio", "0022_project_sharing_drop_old_link")]
+        executor = MigrationExecutor(connection)
+        executor.migrate(before)
+        old = MigrationExecutor(connection).loader.project_state(before).apps
+        user = old.get_model("auth", "User").objects.create(username="legacy")
+        profile = old.get_model("portfolio", "Profile").objects.create(user=user, display_pic="https://x.example/p.png")
+        Track, Project = old.get_model("portfolio", "PortfolioTrack"), old.get_model("portfolio", "Portfolio")
+        one = Track.objects.create(profile=profile, name="One", slug="one")
+        two = Track.objects.create(profile=profile, name="Two", slug="two")
+        Project.objects.create(track=one, category="WebDev", name="In one", thumbnail="https://x.example/a.png", project_link="https://x.example/a")
+        Project.objects.create(track=one, category="WebDev", name="Also in one", thumbnail="https://x.example/b.png", project_link="https://x.example/b")
+        Project.objects.create(track=two, category="CAD", name="In two", thumbnail="https://x.example/c.png", project_link="https://x.example/c", description="Kept.")
+
+        executor = MigrationExecutor(connection)
+        executor.migrate(after)
+        new = executor.loader.project_state(after).apps
+        shown = {p.name: sorted(t.name for t in p.tracks.all()) for p in new.get_model("portfolio", "Portfolio").objects.all()}
+        self.assertEqual(shown, {"In one": ["One"], "Also in one": ["One"], "In two": ["Two"]})
+        self.assertEqual(new.get_model("portfolio", "Portfolio").objects.get(name="In two").description, "Kept.")
+
+        executor = MigrationExecutor(connection)
+        executor.migrate(before)
+        back = executor.loader.project_state(before).apps
+        homes = {p.name: p.track.name for p in back.get_model("portfolio", "Portfolio").objects.select_related("track")}
+        self.assertEqual(homes, {"In one": "One", "Also in one": "One", "In two": "Two"})
+
+        MigrationExecutor(connection).migrate(MigrationExecutor(connection).loader.graph.leaf_nodes())   # leave the schema as found
+
+
 # ---------------------------------------------------------------- resume ------
 
 import docx
@@ -1120,7 +1392,7 @@ class ResumeExportTests(APITestCase):
                                             start_year=date(2020, 1, 6), end_year=date(2024, 10, 5))
         for skill, rating in (("Rust", 87), ("Python", 78), ("C++", 52), ("C", 20)):
             Proficiency.objects.create(about=about, skill_name=skill, skill_range=rating)
-        self.shop = Portfolio.objects.create(track=self.fs, category="WebDev", name="Shop", thumbnail="https://a.com/t.png",
+        self.shop = make_project(self.fs, category="WebDev", name="Shop", thumbnail="https://a.com/t.png",
                                              project_link="https://shop.example.com", description="A small online shop with a cart and card payments.")
         Proficiency.objects.create(about=self.cad.about, skill_name="Solid Works", skill_range=70)
         Resume.objects.create(about=self.cad.about, post="Draftsman", company_name="Drawing Co",
@@ -1475,7 +1747,7 @@ class ResumeExportTests(APITestCase):
         return res.content
 
     def test_graphic_designs_show_each_project_with_thumbnail_description_and_link(self):
-        Portfolio.objects.create(track=self.fs, category="Robotics", name="Fence Lamp", thumbnail="https://a.com/lamp.png",
+        make_project(self.fs, category="Robotics", name="Fence Lamp", thumbnail="https://a.com/lamp.png",
                                  project_link="https://lamp.example.com", description="Lights a fence line at dusk.")
         for key in GRAPHIC_DESIGNS:
             with self.subTest(key):
@@ -1513,7 +1785,7 @@ class ResumeExportTests(APITestCase):
 
     def test_a_resume_carries_the_five_most_recent_projects_newest_first(self):
         for i in range(8):
-            Portfolio.objects.create(track=self.fs, category="WebDev", name=f"Project {i}", thumbnail=f"https://a.com/{i}.png",
+            make_project(self.fs, category="WebDev", name=f"Project {i}", thumbnail=f"https://a.com/{i}.png",
                                      project_link=f"https://p{i}.example.com", description="Does a thing. " * 10)
         # 9 projects now (Shop is the oldest); the five added last are Project 7 .. Project 3
         for key in ATS_DESIGNS + GRAPHIC_DESIGNS:
@@ -1534,7 +1806,7 @@ class ResumeExportTests(APITestCase):
 
     def test_five_or_fewer_projects_all_appear(self):
         for i in range(4):
-            Portfolio.objects.create(track=self.fs, category="WebDev", name=f"Project {i}", thumbnail=f"https://a.com/{i}.png",
+            make_project(self.fs, category="WebDev", name=f"Project {i}", thumbnail=f"https://a.com/{i}.png",
                                      project_link=f"https://p{i}.example.com", description="Does a thing. " * 10)
         for key in ATS_DESIGNS + GRAPHIC_DESIGNS:
             with self.subTest(key):
@@ -1547,7 +1819,7 @@ class ResumeExportTests(APITestCase):
         before = pdf_text(self.get("full-stack", "download/pdf").content)
         self.assertIn("Shop", before)
         for i in range(5):
-            Portfolio.objects.create(track=self.fs, category="WebDev", name=f"Fresh {i}", thumbnail=f"https://a.com/f{i}.png",
+            make_project(self.fs, category="WebDev", name=f"Fresh {i}", thumbnail=f"https://a.com/f{i}.png",
                                      project_link=f"https://f{i}.example.com")
         after = pdf_text(self.get("full-stack", "download/pdf").content)
         self.assertNotIn("Shop", after, "five newer projects push the oldest off")

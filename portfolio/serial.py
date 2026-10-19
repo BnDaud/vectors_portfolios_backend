@@ -1,7 +1,7 @@
 from rest_framework.serializers import ModelSerializer  , HyperlinkedModelSerializer
 from rest_framework.serializers import SlugRelatedField , HyperlinkedRelatedField
 from rest_framework.serializers import ChoiceField ,CharField ,SerializerMethodField
-from rest_framework.serializers import IntegerField , BooleanField
+from rest_framework.serializers import IntegerField , BooleanField , PrimaryKeyRelatedField , JSONField
 from rest_framework import serializers
 from django.contrib.auth.models import User
 from django.utils.text import slugify
@@ -118,17 +118,81 @@ class AboutSerial(ModelSerializer):
         fields = "__all__"
 
 
+def delete_if_in_no_portfolio(project):
+    """A project shown in no portfolio is of no use to anyone: remove it. True when it was removed."""
+    if project.pk and not project.tracks.exists():
+        project.delete()
+        return True
+    return False
+
+
 class PortfolioSerial(ModelSerializer):
+    """
+    A project, shared by as many portfolios as list it.
+      read:   `tracks` - the ids of the portfolios that show it
+      create: `track` - the portfolio it is added to; optionally `share_with` (a list of
+              portfolio ids, or "all") to show it in others too, or `tracks` (the full list)
+      update: `tracks` - the full list it should now be shown in; the others are untouched,
+              and an empty list deletes the project (it would be shown nowhere)
+    """
     category = ChoiceField(choices=Portfolio.portfolio_choice)
 
     display_username = SerializerMethodField(read_only = True)
+    tracks = PrimaryKeyRelatedField(many = True , queryset = PortfolioTrack.objects.all() , required = False)
+    track = PrimaryKeyRelatedField(queryset = PortfolioTrack.objects.all() , write_only = True , required = False)
+    share_with = JSONField(write_only = True , required = False , allow_null = True)
 
     def get_display_username(self , obj):
-        return obj.track.profile.user.username
+        first = obj.tracks.first()
+        return first.profile.user.username if first else ""
 
     class Meta:
         model = Portfolio
-        fields = ["id", "category" , "display_username" , "track" , "name" , "thumbnail" , "project_link" , "description"]
+        fields = ["id", "category" , "display_username" , "tracks" , "track" , "share_with" , "name" , "thumbnail" , "project_link" , "description"]
+
+    def validate(self , attrs):
+        share = attrs.pop("share_with" , None)
+        primary = attrs.pop("track" , None)
+        if self.instance is not None:      # an edit: only `tracks` can change who shows it
+            if "tracks" in attrs:
+                self._same_owner(attrs["tracks"] , self.instance.tracks.first())
+            return attrs
+
+        targets = list(attrs.get("tracks" , []))
+        if primary is not None:
+            targets.append(primary)
+        if not targets:
+            raise serializers.ValidationError({"track": "Say which portfolio this project is added to."})
+        owner = targets[0].profile
+        if share == "all":
+            targets += list(PortfolioTrack.objects.filter(profile = owner))
+        elif share is not None:
+            if not isinstance(share , list) or not all(isinstance(i , int) and not isinstance(i , bool) for i in share):
+                raise serializers.ValidationError({"share_with": "Use a list of portfolio ids, or \"all\"."})
+            found = {t.pk: t for t in PortfolioTrack.objects.filter(pk__in = share)}
+            missing = [i for i in share if i not in found]
+            if missing:
+                raise serializers.ValidationError({"share_with": f"No such portfolio: {missing[0]}."})
+            targets += [found[i] for i in share]
+        self._same_owner(targets , targets[0])
+        attrs["tracks"] = list({t.pk: t for t in targets}.values())
+        return attrs
+
+    @staticmethod
+    def _same_owner(tracks , reference):
+        if reference is not None and any(t.profile_id != reference.profile_id for t in tracks):
+            raise serializers.ValidationError({"tracks": "A project can only be shared between portfolios of the same owner."})
+
+    @transaction.atomic
+    def update(self , instance , validated_data):
+        wanted = validated_data.pop("tracks" , None)
+        project = super().update(instance , validated_data)
+        if wanted is not None:
+            current = set(project.tracks.all())
+            project.tracks.add(*(set(wanted) - current))       # add before removing, so it never sits in none by accident
+            project.tracks.remove(*(current - set(wanted)))
+            delete_if_in_no_portfolio(project)                  # unticked everywhere: gone (project.pk is then None)
+        return project
 
 
 class PortfolioTrackSerial(ModelSerializer):
@@ -199,9 +263,10 @@ class PortfolioTrackSerial(ModelSerializer):
                                             description = p.description)
             if copy_items:
                 for item in source.items.all():
-                    Portfolio.objects.create(track = track , category = item.category , name = item.name ,
-                                              thumbnail = item.thumbnail , project_link = item.project_link ,
-                                              description = item.description)
+                    # a copy of the portfolio gets its own copies of the projects, independent of the originals
+                    Portfolio.objects.create(category = item.category , name = item.name ,
+                                             thumbnail = item.thumbnail , project_link = item.project_link ,
+                                             description = item.description).tracks.add(track)
         else:
             About.objects.create(track = track , skill = "" , description = "" , image_link = "")
 
