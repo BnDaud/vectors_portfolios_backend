@@ -1511,18 +1511,47 @@ class ResumeExportTests(APITestCase):
                     self.assertIn("A small online shop", text)
                     self.assertIn("S", text.split(), f"{key}: the tile carries the project's first letter")
 
-    def test_a_long_project_list_flows_onto_more_pages_without_cutting_cards(self):
-        for i in range(14):
+    def test_a_resume_carries_the_five_most_recent_projects_newest_first(self):
+        for i in range(8):
             Portfolio.objects.create(track=self.fs, category="WebDev", name=f"Project {i}", thumbnail=f"https://a.com/{i}.png",
                                      project_link=f"https://p{i}.example.com", description="Does a thing. " * 10)
-        for key in GRAPHIC_DESIGNS:
+        # 9 projects now (Shop is the oldest); the five added last are Project 7 .. Project 3
+        for key in ATS_DESIGNS + GRAPHIC_DESIGNS:
             with self.subTest(key):
-                with pymupdf.open(stream=self.card_pdf(key), filetype="pdf") as doc:
+                with pymupdf.open(stream=self.get("full-stack", "download/pdf", key).content, filetype="pdf") as doc:
                     text = "".join(page.get_text() for page in doc)
-                    self.assertGreaterEqual(len(doc), 2)
-                    for i in range(14):
-                        self.assertIn(f"Project {i}", text, f"{key}: project {i} is not lost")
-                        self.assertIn(f"p{i}.example.com", text, key)
+                for i in range(3, 8):
+                    self.assertIn(f"Project {i}", text, f"{key}: project {i} is one of the five newest")
+                for old in ("Project 2", "Project 1", "Project 0", "Shop"):
+                    self.assertNotIn(old, text, f"{key}: {old} is older than the five newest")
+                self.assertLess(text.index("Project 7"), text.index("Project 3"), f"{key}: newest first")
+        word = docx.Document(io.BytesIO(self.get("full-stack", "download/docx").content))
+        joined = "\n".join(p.text for p in word.paragraphs)
+        self.assertIn("Project 7", joined); self.assertNotIn("Project 2", joined); self.assertNotIn("Shop", joined)
+        # the website still lists every one of them
+        tracks = APIClient(HTTP_HOST="localhost").get(f"{API}/tracks/?username=owner").json()
+        self.assertEqual(len(next(t for t in tracks if t["slug"] == "full-stack")["items"]), 9)
+
+    def test_five_or_fewer_projects_all_appear(self):
+        for i in range(4):
+            Portfolio.objects.create(track=self.fs, category="WebDev", name=f"Project {i}", thumbnail=f"https://a.com/{i}.png",
+                                     project_link=f"https://p{i}.example.com", description="Does a thing. " * 10)
+        for key in ATS_DESIGNS + GRAPHIC_DESIGNS:
+            with self.subTest(key):
+                text = pdf_text(self.get("full-stack", "download/pdf", key).content)
+                for name in ("Shop", "Project 0", "Project 1", "Project 2", "Project 3"):
+                    self.assertIn(name, text, f"{key}: {name}")
+        self.assertEqual(len(resume_builder.collect(self.cad, "https://site.example")["projects"]), 0)
+
+    def test_the_cap_follows_new_projects_and_cached_files_do_not_hide_it(self):
+        before = pdf_text(self.get("full-stack", "download/pdf").content)
+        self.assertIn("Shop", before)
+        for i in range(5):
+            Portfolio.objects.create(track=self.fs, category="WebDev", name=f"Fresh {i}", thumbnail=f"https://a.com/f{i}.png",
+                                     project_link=f"https://f{i}.example.com")
+        after = pdf_text(self.get("full-stack", "download/pdf").content)
+        self.assertNotIn("Shop", after, "five newer projects push the oldest off")
+        self.assertIn("Fresh 4", after)
 
     def test_ats_designs_show_the_description_and_link_but_no_thumbnail(self):
         for key in ATS_DESIGNS:

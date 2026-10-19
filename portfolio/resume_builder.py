@@ -34,6 +34,7 @@ from reportlab.platypus import (
 from .resume_text import LEVELS, level_for, link as _link, p as _p, pdf_safe as _pdf_safe, short_url as _short_url  # noqa: F401
 
 CACHE_SECONDS = 3600
+MAX_PROJECTS = 5   # a resume carries the most recent few; the website still lists them all
 
 # The resume designs the owner can pick from. "formats" are the files each can
 # be saved as: the designed layout is PDF only because Word does not hold a
@@ -130,10 +131,12 @@ def collect(track, site_url):
             if skill.certificate_link:
                 certificates.append((skill.skill_name, skill.certificate_link))
 
+    # items carry no date, so the most recently added (highest id) are the most recent; newest first, like experience
+    recent = sorted(track.items.all(), key=lambda item: -item.id)[:MAX_PROJECTS]
     projects = [
         {"name": item.name, "category": item.category, "link": item.project_link,
          "description": item.description.strip(), "thumbnail": item.thumbnail}
-        for item in track.items.all()
+        for item in recent
     ]
 
     return {
