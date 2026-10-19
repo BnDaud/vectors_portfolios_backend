@@ -114,7 +114,7 @@ REST_FRAMEWORK = {
         # per IP, for the public visitor beacon
         "visit": "120/hour",
         # per IP, for the read-only resume viewer (a view loads one JSON + one image per page)
-        "resume_view": "240/hour",
+        "resume_view": "600/hour",
     },
 }
 

@@ -1,5 +1,6 @@
 from datetime import date
 from django.db import models
+from django.utils import timezone
 from django.contrib.auth.models import User
 from django.core.validators import MinValueValidator, MaxValueValidator
 
@@ -265,3 +266,17 @@ class PageView(models.Model):
             models.UniqueConstraint(fields=["visitor" , "visit_number"] , condition=models.Q(track__isnull=True) ,
                                     name="one_landing_view_per_visit"),
         ]
+
+
+class ResumeView(models.Model):
+    """
+    A visitor opening a portfolio's read-only resume. Like Visitor it holds
+    nothing personal: just which anonymous browser, which portfolio and when.
+    Reopening the same resume within a visit is not counted again.
+    """
+    visitor = models.ForeignKey(Visitor , on_delete=models.CASCADE , related_name="resume_views")
+    track = models.ForeignKey(PortfolioTrack , on_delete=models.CASCADE , related_name="resume_views")
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["-created_at"]

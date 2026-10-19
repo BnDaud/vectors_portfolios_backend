@@ -9,7 +9,7 @@ from django.contrib.auth.models import User
 from django.core.cache import cache
 from django.core.management import call_command
 from io import StringIO
-from django.test import override_settings
+from django.test import SimpleTestCase, override_settings
 import uuid
 from datetime import timedelta
 from django.utils import timezone
@@ -17,8 +17,8 @@ from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.test import APIClient, APITestCase
 
 from .models import (
-    About, ENTRY_DESCRIPTION_MAX, PageView, Portfolio, PortfolioTrack, Profile, Proficiency, Resume, School,
-    TRACK_CONTACT_FIELDS, Visitor,
+    About, ENTRY_DESCRIPTION_MAX, PageView, Portfolio, PortfolioTrack, Profile, Proficiency, Resume, ResumeView,
+    School, TRACK_CONTACT_FIELDS, Visitor,
 )
 
 API = "/api_root"
@@ -819,20 +819,233 @@ class VisitorAnalyticsTests(APITestCase):
         self.fs.delete()
         self.assertEqual((Visitor.objects.count(), PageView.objects.count()), (1, 0))
 
+    # --- resume views -------------------------------------------------------------------
+
+    def open_resume(self, vid, slug="full-stack", client=None):
+        return (client or self.browser()).post(f"{API}/analytics/resume-view", {"visitor_id": str(vid), "slug": slug}, format="json")
+
+    def test_opening_a_resume_is_counted_per_portfolio_with_the_time(self):
+        vid, t0 = uuid.uuid4(), timezone.now() - timedelta(hours=5)
+        with self.at(t0):
+            self.assertEqual(self.open_resume(vid, "full-stack").status_code, 204)
+            self.assertEqual(self.open_resume(vid, "cad").status_code, 204)
+        row = ResumeView.objects.get(track=self.fs)
+        self.assertEqual((row.visitor.visitor_id, row.created_at), (vid, t0))
+        self.assertEqual(ResumeView.objects.count(), 2)
+        self.assertEqual(Visitor.objects.count(), 1, "the same browser is one visitor")
+
+    def test_a_refresh_is_not_counted_again_but_coming_back_later_is(self):
+        vid, t0 = uuid.uuid4(), timezone.now() - timedelta(hours=5)
+        with self.at(t0):
+            self.open_resume(vid)
+        with self.at(t0 + timedelta(minutes=10)):
+            self.open_resume(vid)
+        self.assertEqual(ResumeView.objects.count(), 1)
+        with self.at(t0 + timedelta(hours=3)):
+            self.open_resume(vid)
+        self.assertEqual(ResumeView.objects.count(), 2)
+
+    def test_two_people_opening_the_same_resume_are_two_views(self):
+        self.open_resume(uuid.uuid4()); self.open_resume(uuid.uuid4())
+        self.assertEqual((ResumeView.objects.count(), Visitor.objects.count()), (2, 2))
+
+    def test_the_owner_bots_and_unknown_portfolios_are_not_counted(self):
+        self.assertEqual(self.open_resume(uuid.uuid4(), client=self.owner_client()).status_code, 204)
+        for agent in ("Googlebot/2.1", "HeadlessChrome/120.0", "python-requests/2.31", ""):
+            self.assertEqual(self.open_resume(uuid.uuid4(), client=self.browser(agent)).status_code, 204, agent)
+        self.assertEqual(self.open_resume(uuid.uuid4(), "no-such-portfolio").status_code, 204)
+        self.assertEqual(self.browser().post(f"{API}/analytics/resume-view", {"visitor_id": str(uuid.uuid4()), "slug": {"x": 1}}, format="json").status_code, 204)
+        self.assertEqual((ResumeView.objects.count(), Visitor.objects.count()), (0, 0))
+
+    def test_a_bad_visitor_id_is_a_400(self):
+        self.assertEqual(self.browser().post(f"{API}/analytics/resume-view", {"slug": "full-stack"}, format="json").status_code, 400)
+        self.assertEqual(self.open_resume("not-a-uuid").status_code, 400)
+        self.assertEqual(ResumeView.objects.count(), 0)
+
+    def test_the_resume_beacon_is_rate_limited(self):
+        with mock.patch.dict(ScopedRateThrottle.THROTTLE_RATES, {"visit": "3/hour"}):
+            codes = [self.open_resume(uuid.uuid4()).status_code for _ in range(5)]
+        self.assertEqual(codes, [204, 204, 204, 429, 429])
+
+    def test_the_summary_shows_how_many_times_which_resume_and_when(self):
+        a, b, t0 = uuid.uuid4(), uuid.uuid4(), timezone.now() - timedelta(hours=6)
+        with self.at(t0):
+            self.open_resume(a, "full-stack")
+        with self.at(t0 + timedelta(hours=1)):
+            self.open_resume(b, "full-stack")
+        with self.at(t0 + timedelta(hours=2)):
+            self.open_resume(a, "cad")
+        with self.at(t0 + timedelta(hours=4)):
+            self.open_resume(a, "full-stack")                 # A comes back to the first one
+        data = self.owner_client().get(self.summary).json()["resume"]
+
+        self.assertEqual((data["total_views"], data["viewers"]), (4, 2))
+        by_slug = {row["slug"]: row for row in data["portfolios"]}
+        self.assertEqual((by_slug["full-stack"]["views"], by_slug["full-stack"]["viewers"]), (3, 2))
+        self.assertEqual((by_slug["cad"]["views"], by_slug["cad"]["viewers"]), (1, 1))
+        self.assertEqual(by_slug["full-stack"]["last_viewed"], (t0 + timedelta(hours=4)).isoformat().replace("+00:00", "Z"))
+        recent = data["recent"]
+        self.assertEqual([r["slug"] for r in recent], ["full-stack", "cad", "full-stack", "full-stack"], "newest first")
+        self.assertEqual(recent[0]["name"], "Full Stack")
+        self.assertTrue(all(r["at"] for r in recent))
+
+        people = {tuple(sorted((v["slug"], v["views"]) for v in person["resume_views"])) for person in self.owner_client().get(self.summary).json()["recent"]}
+        self.assertEqual(people, {(("cad", 1), ("full-stack", 2)), (("full-stack", 1),)})
+
+    def test_an_unviewed_portfolio_reads_zero_not_missing(self):
+        data = self.owner_client().get(self.summary).json()["resume"]
+        self.assertEqual((data["total_views"], data["viewers"], data["recent"]), (0, 0, []))
+        self.assertEqual([(r["slug"], r["views"], r["last_viewed"]) for r in data["portfolios"]], [("full-stack", 0, None), ("cad", 0, None)])
+
+    def test_the_summary_lists_only_the_latest_resume_views(self):
+        t0 = timezone.now() - timedelta(days=1)
+        for i in range(20):
+            with self.at(t0 + timedelta(minutes=i)):
+                self.open_resume(uuid.uuid4())
+        data = self.owner_client().get(self.summary).json()["resume"]
+        self.assertEqual((data["total_views"], len(data["recent"])), (20, 15))
+
+    def test_resume_views_hold_nothing_personal_and_follow_their_portfolio(self):
+        vid = uuid.uuid4()
+        self.open_resume(vid)
+        self.assertNotIn(str(vid), self.owner_client().get(self.summary).content.decode())
+        self.assertEqual({f.name for f in ResumeView._meta.get_fields()} & {"ip", "ip_address", "user_agent"}, set())
+        self.fs.delete()
+        self.assertEqual((ResumeView.objects.count(), Visitor.objects.count()), (0, 1))
+
+    def test_only_the_owner_sees_resume_views(self):
+        self.open_resume(uuid.uuid4())
+        self.assertIn(self.browser().get(self.summary).status_code, (401, 403))
+
 
 # ---------------------------------------------------------------- resume ------
 
 import docx
 import pymupdf
 
-from portfolio import resume_builder
+from portfolio import resume_builder, resume_photo
 
 TODAY = date(2026, 10, 18)
+
+ATS_DESIGNS = ["ats", "classic", "compact", "executive", "technical"]
+GRAPHIC_DESIGNS = ["modern", "midnight", "banner", "timeline", "elegant"]
+STANDARD_FONTS = ("Helvetica", "Times", "Courier")      # the PDF base fonts every parser and printer has
+
+
+def make_jpeg(size=(300, 400), colour=(120, 80, 60)):
+    from PIL import Image
+    out = io.BytesIO()
+    Image.new("RGB", size, colour).save(out, "JPEG")
+    return out.getvalue()
 
 
 def pdf_text(blob):
     with pymupdf.open(stream=blob, filetype="pdf") as doc:
         return "\n".join(page.get_text() for page in doc)
+
+
+class ResumePhotoTests(SimpleTestCase):
+    """The owner's picture is a web address they typed, fetched by our server:
+    only public http(s) pictures are accepted, and any problem means initials."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        import http.server
+        import threading
+        cls.hits = []
+        jpeg = make_jpeg((300, 500))
+        from PIL import Image
+        import os
+        huge = io.BytesIO()   # a perfectly good picture, but far over the size limit
+        Image.frombytes("RGB", (1800, 1800), os.urandom(1800 * 1800 * 3)).save(huge, "PNG", compress_level=0)
+        huge = huge.getvalue()
+        assert len(huge) > resume_photo.MAX_BYTES
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                cls.hits.append(self.path)
+                routes = {
+                    "/ok.jpg": (200, "image/jpeg", jpeg),
+                    "/page.html": (200, "text/html", b"<html>not a picture</html>"),
+                    "/big.png": (200, "image/png", huge),
+                    "/disguised": (200, "text/html", jpeg),     # picture bytes, but not served as an image
+                    "/broken.jpg": (200, "image/jpeg", b"definitely not a jpeg"),
+                }
+                if self.path == "/to-ok":
+                    self.send_response(302); self.send_header("Location", "/ok.jpg"); self.end_headers(); return
+                if self.path == "/to-private":    # "localhost" is this same server, but the guard (patched below) calls it private
+                    self.send_response(302); self.send_header("Location", f"http://localhost:{cls.server.server_address[1]}/ok.jpg"); self.end_headers(); return
+                if self.path == "/loop":
+                    self.send_response(302); self.send_header("Location", "/loop"); self.end_headers(); return
+                status, kind, body = routes.get(self.path, (404, "text/plain", b"no"))
+                self.send_response(status); self.send_header("Content-Type", kind); self.send_header("Content-Length", str(len(body))); self.end_headers()
+                self.wfile.write(body)
+
+        cls.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        cls.base = f"http://127.0.0.1:{cls.server.server_address[1]}"
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        super().tearDownClass()
+
+    def setUp(self):
+        cache.clear()
+        self.hits.clear()
+        # the test server lives on 127.0.0.1, so for these tests only that address counts as public
+        patcher = mock.patch.object(resume_photo, "_is_public", side_effect=lambda host: host == "127.0.0.1")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_a_good_picture_comes_back_square_and_jpeg(self):
+        from PIL import Image
+        raw = resume_photo.fetch_photo(f"{self.base}/ok.jpg")
+        image = Image.open(io.BytesIO(raw))
+        self.assertEqual((image.format, image.size), ("JPEG", (resume_photo.SIDE, resume_photo.SIDE)))
+
+    def test_it_is_fetched_once_then_remembered_even_when_it_failed(self):
+        resume_photo.fetch_photo(f"{self.base}/ok.jpg"); resume_photo.fetch_photo(f"{self.base}/ok.jpg")
+        resume_photo.fetch_photo(f"{self.base}/gone.jpg"); resume_photo.fetch_photo(f"{self.base}/gone.jpg")
+        self.assertEqual(sorted(self.hits), ["/gone.jpg", "/ok.jpg"])
+
+    def test_bad_pictures_give_nothing_and_never_raise(self):
+        for path in ("/page.html", "/big.png", "/disguised", "/broken.jpg", "/gone.jpg", "/loop"):
+            self.assertIsNone(resume_photo.fetch_photo(self.base + path), path)
+        self.assertIsNone(resume_photo.fetch_photo(""))
+        self.assertIsNone(resume_photo.fetch_photo(None))
+
+    def test_a_redirect_to_a_picture_is_followed_but_one_to_a_private_address_is_not(self):
+        self.assertTrue(resume_photo.fetch_photo(f"{self.base}/to-ok"))
+        self.hits.clear()
+        self.assertIsNone(resume_photo.fetch_photo(f"{self.base}/to-private"))
+        self.assertEqual(self.hits, ["/to-private"], "the private address was never contacted")
+        self.assertTrue(resume_photo.fetch_photo(f"{self.base}/ok.jpg"), "while the same picture is fine by its public name")
+
+
+class ResumePhotoGuardTests(SimpleTestCase):
+    """The real address check, with nothing patched."""
+
+    def setUp(self):
+        cache.clear()
+
+    def test_private_and_local_addresses_are_never_fetched(self):
+        with mock.patch("urllib.request.OpenerDirector.open") as opened:
+            for url in ("http://127.0.0.1/a.jpg", "http://localhost/a.jpg", "http://[::1]/a.jpg", "http://10.0.0.5/a.jpg",
+                        "http://192.168.1.10/a.jpg", "http://172.16.0.1/a.jpg", "http://169.254.169.254/latest/meta-data/",
+                        "http://0.0.0.0/a.jpg", "http://2130706433/a.jpg", "file:///etc/passwd", "ftp://example.com/a.jpg",
+                        "javascript:alert(1)", "http:///a.jpg", "data:image/png;base64,AAAA"):
+                self.assertIsNone(resume_photo.fetch_photo(url), url)
+            opened.assert_not_called()
+
+    def test_a_name_that_does_not_resolve_is_not_public(self):
+        self.assertFalse(resume_photo._is_public("no-such-host.invalid"))
+        self.assertTrue(resume_photo._is_public("8.8.8.8"))
 
 
 @override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"], SITE_URL="https://site.example")
@@ -862,6 +1075,9 @@ class ResumeExportTests(APITestCase):
 
     def setUp(self):
         cache.clear()
+        self.photo = mock.patch("portfolio.resume_graphics.fetch_photo", side_effect=lambda url: make_jpeg() if url else None)
+        self.fetch_photo = self.photo.start()
+        self.addCleanup(self.photo.stop)
         self.client = APIClient(HTTP_HOST="localhost")
         self.client.force_authenticate(user=self.user)
         about = self.fs.about
@@ -1074,6 +1290,180 @@ class ResumeExportTests(APITestCase):
         anon = APIClient(HTTP_HOST="localhost")
         self.assertIn(anon.get(self.url("full-stack", "download/pdf")).status_code, (401, 403))
         self.assertEqual(anon.get(self.url("full-stack", "pages/1.pdf")).status_code, 404)
+
+    # --- the designs -----------------------------------------------------------------------
+
+    def get(self, slug, tail, template=None, client=None):
+        suffix = f"?template={template}" if template else ""
+        return (client or self.client).get(self.url(slug, tail) + suffix)
+
+    def test_the_design_list_is_public_and_has_five_of_each_kind(self):
+        res = APIClient(HTTP_HOST="localhost").get(f"{API}/resume-export/templates")
+        self.assertEqual(res.status_code, 200)
+        designs = res.json()
+        self.assertEqual([d["key"] for d in designs if d["group"] == "ats"], ATS_DESIGNS)
+        self.assertEqual([d["key"] for d in designs if d["group"] == "graphic"], GRAPHIC_DESIGNS)
+        self.assertEqual([d["key"] for d in designs if d["default"]], ["ats"])
+        for design in designs:
+            self.assertTrue(design["label"] and design["blurb"], design)
+            self.assertEqual(design["formats"], ["pdf", "docx"] if design["group"] == "ats" else ["pdf"], design["key"])
+
+    def test_every_ats_design_is_plain_text_a_parser_can_read(self):
+        for key in ATS_DESIGNS:
+            with self.subTest(key):
+                res = self.get("full-stack", "download/pdf", key)
+                self.assertEqual(res.status_code, 200, res.content[:200])
+                with pymupdf.open(stream=res.content, filetype="pdf") as doc:
+                    text = "".join(page.get_text() for page in doc)
+                    for needle in ("Sulaimon Lawal", "fs@example.com", "+2348000000001", "Abuja, Nigeria", "Rust", "Pio Tech",
+                                   "Ahmadu Bello University", "Shop", "https://site.example/full-stack"):
+                        self.assertIn(needle, text, f"{key}: {needle}")
+                    order = [text.index(h) for h in ("PROFESSIONAL SUMMARY", "SKILLS", "PROFESSIONAL EXPERIENCE", "EDUCATION", "PROJECTS")]
+                    self.assertEqual(order, sorted(order), key)
+                    fonts = set()
+                    for page in doc:
+                        self.assertEqual(page.get_images(), [], f"{key}: no pictures")
+                        self.assertEqual(page.find_tables().tables, [], f"{key}: no tables")
+                        fonts |= {f[3] for f in page.get_fonts()}
+                        boxes = [b for b in page.get_text("blocks") if b[4].strip()]
+                        for i, a in enumerate(boxes):
+                            for b in boxes[i + 1:]:
+                                stacked = min(a[3], b[3]) - max(a[1], b[1]) > 3
+                                disjoint = a[2] < b[0] or b[2] < a[0]
+                                self.assertFalse(stacked and disjoint, f"{key}: two columns side by side: {a[4]!r} / {b[4]!r}")
+                    self.assertTrue(fonts and all(f.startswith(STANDARD_FONTS) for f in fonts), f"{key}: {fonts}")
+                    self.assertTrue(any(l["kind"] == pymupdf.LINK_URI for l in doc[0].get_links()), f"{key}: links clickable")
+                    self.assertEqual(doc.metadata["title"], "Sulaimon Lawal - Resume")
+
+    def test_every_ats_design_has_a_word_version_with_real_structure(self):
+        for key in ATS_DESIGNS:
+            with self.subTest(key):
+                res = self.get("full-stack", "download/docx", key)
+                self.assertEqual(res.status_code, 200)
+                document = docx.Document(io.BytesIO(res.content))
+                headings = [p.text for p in document.paragraphs if p.style.name == "Heading 1"]
+                self.assertEqual(headings, ["PROFESSIONAL SUMMARY", "SKILLS", "PROFESSIONAL EXPERIENCE", "EDUCATION", "PROJECTS", "CERTIFICATES"], key)
+                self.assertIn("Built line-following robots.", [p.text for p in document.paragraphs if p.style.name == "List Bullet"])
+                self.assertEqual((len(document.tables), len(document.inline_shapes)), (0, 0), f"{key}: no tables or pictures")
+                self.assertTrue(any("hyperlink" in p._p.xml for p in document.paragraphs), key)
+
+    def test_the_ats_designs_look_different_from_each_other(self):
+        pdfs = {key: self.get("full-stack", "download/pdf", key).content for key in ATS_DESIGNS}
+        self.assertEqual(len(set(pdfs.values())), 5)
+        words = {key: self.get("full-stack", "download/docx", key).content for key in ATS_DESIGNS}
+        self.assertEqual(len(set(words.values())), 5)
+        with pymupdf.open(stream=pdfs["classic"], filetype="pdf") as classic, pymupdf.open(stream=pdfs["technical"], filetype="pdf") as technical:
+            self.assertTrue(any("Times" in f[3] for f in classic[0].get_fonts()))
+            self.assertTrue(any("Courier" in f[3] for f in technical[0].get_fonts()))
+
+    def test_every_graphic_design_is_a_pdf_with_the_photo(self):
+        for key in GRAPHIC_DESIGNS:
+            with self.subTest(key):
+                res = self.get("full-stack", "download/pdf", key)
+                self.assertEqual(res.status_code, 200, res.content[:200])
+                with pymupdf.open(stream=res.content, filetype="pdf") as doc:
+                    self.assertEqual(len(doc[0].get_images()), 1, f"{key}: the photo is on page one")
+                    text = doc[0].get_text()
+                    for needle in ("Sulaimon Lawal", "fs@example.com", "Rust", "Pio Tech", "Ahmadu Bello University"):
+                        self.assertIn(needle, text, f"{key}: {needle}")
+                    self.assertTrue(any(l["kind"] == pymupdf.LINK_URI for l in doc[0].get_links()), f"{key}: links clickable")
+
+    def test_graphic_designs_put_the_photo_in_different_places(self):
+        spots = {}
+        for key in GRAPHIC_DESIGNS:
+            with pymupdf.open(stream=self.get("full-stack", "download/pdf", key).content, filetype="pdf") as doc:
+                box = doc[0].get_image_rects(doc[0].get_images()[0][0])[0]
+                spots[key] = (round(box.x0 / doc[0].rect.width, 1), round(box.y0 / doc[0].rect.height, 1), round(box.width))
+        self.assertEqual(len(set(spots.values())), 5, spots)
+
+    def test_graphic_designs_are_not_available_as_word(self):
+        for key in GRAPHIC_DESIGNS:
+            res = self.get("full-stack", "download/docx", key)
+            self.assertEqual(res.status_code, 400, key)
+            self.assertIn("template", res.json())
+
+    def test_no_photo_means_initials_in_the_same_spot(self):
+        self.fetch_photo.side_effect = lambda url: None
+        for key in GRAPHIC_DESIGNS:
+            with self.subTest(key):
+                res = self.get("full-stack", "download/pdf", key)
+                self.assertEqual(res.status_code, 200)
+                with pymupdf.open(stream=res.content, filetype="pdf") as doc:
+                    self.assertEqual(doc[0].get_images(), [])
+                    self.assertIn("SL", doc[0].get_text().split(), key)
+
+    def test_unknown_design_is_rejected_everywhere(self):
+        for tail in ("download/pdf", "download/docx", "pages", "pages/1.png"):
+            res = self.get("full-stack", tail, "fancy")
+            self.assertEqual(res.status_code, 400, tail)
+        self.assertEqual(self.get("full-stack", "download/pdf", "../etc").status_code, 400)
+
+    def test_only_the_owner_can_download_any_design(self):
+        anon = APIClient(HTTP_HOST="localhost")
+        for key in ATS_DESIGNS + GRAPHIC_DESIGNS:
+            self.assertIn(self.get("full-stack", "download/pdf", key, client=anon).status_code, (401, 403), key)
+
+    def test_file_names_carry_the_design(self):
+        self.assertEqual(self.get("full-stack", "download/pdf")["Content-Disposition"], 'attachment; filename="Sulaimon_Lawal_Full_Stack_Resume.pdf"')
+        self.assertEqual(self.get("full-stack", "download/pdf", "ats")["Content-Disposition"], 'attachment; filename="Sulaimon_Lawal_Full_Stack_Resume.pdf"')
+        self.assertEqual(self.get("full-stack", "download/pdf", "elegant")["Content-Disposition"], 'attachment; filename="Sulaimon_Lawal_Full_Stack_Resume_Elegant.pdf"')
+        self.assertEqual(self.get("cad-engineer", "download/docx", "classic")["Content-Disposition"], 'attachment; filename="Sulaimon_Lawal_CAD_Engineer_Resume_Classic.docx"')
+
+    def test_every_design_survives_awkward_text_an_empty_portfolio_and_a_long_history(self):
+        self.job_now.description = "R&D <b>lead</b> \u2013 caf\u00e9 \u1ecc l\u00e1 \u201cquoted\u201d \u4e2d\u6587"
+        self.job_now.save()
+        self.user.first_name, self.user.last_name = "Chukwuemeka-Oluwaseun", "\u1ecc l\u00e1d\u00e9j\u00ed-Adeyemi-Okonkwo"
+        self.user.save()
+        blank = PortfolioTrack.objects.create(profile=self.profile, name="Blank", slug="blank", display_pic="")
+        About.objects.create(track=blank, skill="", description="")
+        for i in range(40):
+            Resume.objects.create(about=self.fs.about, post=f"Role {i}", company_name=f"Company {i}", start_year=date(2010, 1, 1),
+                                  end_year=date(2011, 1, 1), description="Did a thing.\nDid another thing.")
+        for key in ATS_DESIGNS + GRAPHIC_DESIGNS:
+            with self.subTest(key):
+                text = pdf_text(self.get("full-stack", "download/pdf", key).content)
+                self.assertIn("R&D <b>lead</b>", text)
+                self.assertIn("Role 39", text, "a long history is not cut off")
+                self.assertEqual(self.get("blank", "download/pdf", key).status_code, 200)
+
+    def test_each_design_is_cached_separately_until_the_content_changes(self):
+        with mock.patch.object(resume_builder, "render_pdf", wraps=resume_builder.render_pdf) as render:
+            for key in ("ats", "elegant", "ats", "elegant", "elegant"):
+                self.get("full-stack", "download/pdf", key)
+            self.assertEqual(render.call_count, 2, "one render per design")
+            self.client.patch(f"{API}/tracks/{self.fs.id}", {"display_pic": "https://img.example.com/other.png"}, format="json")
+            self.get("full-stack", "download/pdf", "elegant")
+            self.assertEqual(render.call_count, 3, "a new photo address is new content")
+
+    # --- picking a design in the viewer -----------------------------------------------------
+
+    def test_the_viewer_defaults_to_a_designed_layout_and_can_show_any_design(self):
+        anon = APIClient(HTTP_HOST="localhost")
+        self.assertEqual(anon.get(self.url("full-stack", "pages")).json()["template"], "modern")
+        pages = {key: self.get("full-stack", "pages/1.png", key, client=anon).content for key in ATS_DESIGNS + GRAPHIC_DESIGNS}
+        self.assertEqual(len(set(pages.values())), 10)
+        for blob in pages.values():
+            self.assertTrue(blob.startswith(b"\x89PNG"))
+
+    def test_design_thumbnails_are_small_first_pages(self):
+        anon = APIClient(HTTP_HOST="localhost")
+        full = anon.get(self.url("full-stack", "pages/1.png") + "?template=elegant").content
+        for key in ATS_DESIGNS + GRAPHIC_DESIGNS:
+            res = anon.get(self.url("full-stack", "pages/1.png") + f"?template={key}&thumb=1")
+            self.assertEqual((res.status_code, res["Content-Type"]), (200, "image/png"), key)
+            self.assertTrue(res.content.startswith(b"\x89PNG"))
+        thumb = anon.get(self.url("full-stack", "pages/1.png") + "?template=elegant&thumb=1").content
+        self.assertLess(len(thumb), len(full))
+        self.assertEqual(anon.get(self.url("full-stack", "pages/2.png") + "?template=elegant&thumb=1").status_code, 404)
+        self.assertEqual(anon.get(self.url("nope", "pages/1.png") + "?thumb=1").status_code, 404)
+
+    def test_the_viewer_still_hands_out_pictures_only_for_every_design(self):
+        anon = APIClient(HTTP_HOST="localhost")
+        for key in ATS_DESIGNS + GRAPHIC_DESIGNS:
+            blob = self.get("full-stack", "pages/1.png", key, client=anon).content
+            with pymupdf.open(stream=blob, filetype="png") as picture:
+                self.assertEqual(picture[0].get_text().strip(), "", f"{key}: no text layer")
+            self.assertIn(self.get("full-stack", "download/pdf", key, client=anon).status_code, (401, 403))
 
     # --- ongoing / completed follow the date --------------------------------------------
 

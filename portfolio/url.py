@@ -3,8 +3,8 @@ from .views import ListCreateProfile , api_root , list_about , Userdetail ,updat
 from .views import List_portfolio ,list_about ,UpdateAbout , updateportfolio , list_resume , update_resume , list_school , update_school , list_proficiency , update_proficiency
 from .views import list_tracks , update_track , list_goals , update_goal , complete_goal
 from .auth_views import CsrfPrimeView , LoginView , LogoutView , RefreshView , MeView , ChangePasswordView
-from .analytics_views import RecordVisitView , VisitorSummaryView
-from .resume_views import ResumeDownloadView , ResumePagesView , ResumePageImageView
+from .analytics_views import RecordVisitView , RecordResumeViewView , VisitorSummaryView
+from .resume_views import ResumeDownloadView , ResumePagesView , ResumePageImageView , ResumeTemplatesView
 
 app_name = "portfolio"
 
@@ -112,10 +112,12 @@ urlpatterns = [
 
     path("analytics/visit" , view=RecordVisitView.as_view() , name=RecordVisitView.name),
     path("analytics/summary" , view=VisitorSummaryView.as_view() , name=VisitorSummaryView.name),
+    path("analytics/resume-view" , view=RecordResumeViewView.as_view() , name=RecordResumeViewView.name),
 
     #resume-export/<slug>/download/pdf|docx is the owner-only download of one portfolio's resume
     #resume-export/<slug>/pages and /pages/<n>.png are the public read-only viewer (images only)
 
+    path("resume-export/templates" , view=ResumeTemplatesView.as_view() , name=ResumeTemplatesView.name),
     path("resume-export/<slug:slug>/download/<str:kind>" , view=ResumeDownloadView.as_view() , name=ResumeDownloadView.name),
     path("resume-export/<slug:slug>/pages" , view=ResumePagesView.as_view() , name=ResumePagesView.name),
     path("resume-export/<slug:slug>/pages/<int:page>.png" , view=ResumePageImageView.as_view() , name=ResumePageImageView.name),

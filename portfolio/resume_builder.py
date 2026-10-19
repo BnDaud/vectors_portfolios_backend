@@ -12,7 +12,6 @@ import json
 import re
 import unicodedata
 from datetime import date
-from xml.sax.saxutils import escape
 
 import pymupdf
 from django.core.cache import cache
@@ -22,19 +21,49 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Mm, Pt, RGBColor
 from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
-from reportlab.platypus import HRFlowable, KeepTogether, Paragraph, SimpleDocTemplate, Spacer
+from reportlab.pdfbase.pdfmetrics import stringWidth
+from reportlab.platypus import (
+    BaseDocTemplate, Flowable, Frame, FrameBreak, HRFlowable, KeepInFrame, KeepTogether,
+    NextPageTemplate, PageTemplate, Paragraph, SimpleDocTemplate, Spacer,
+)
 
-# Same bands as the portfolio page (resume.jsx): the owner's 0-100 rating in words.
-LEVELS = [(80, "Expert"), (60, "Advanced"), (35, "Intermediate"), (0, "Beginner")]
+from .resume_text import LEVELS, level_for, link as _link, p as _p, pdf_safe as _pdf_safe, short_url as _short_url  # noqa: F401
 
 CACHE_SECONDS = 3600
 
-
-def level_for(rating):
-    return next(label for floor, label in LEVELS if rating >= floor)
+# The resume designs the owner can pick from. "formats" are the files each can
+# be saved as: the designed layout is PDF only because Word does not hold a
+# coloured header, sidebar and skill bars faithfully.
+TEMPLATES = {
+    # --- plain, ATS-safe: one column of real text, no tables / images / icons ---
+    "ats": {"group": "ats", "label": "ATS standard", "formats": ["pdf", "docx"],
+            "blurb": "The safest all-rounder: clean sans-serif, left aligned, ruled headings."},
+    "classic": {"group": "ats", "label": "Classic", "formats": ["pdf", "docx"],
+                "blurb": "Traditional serif with a centred header and double rules. Formal, academic or senior roles."},
+    "compact": {"group": "ats", "label": "Compact", "formats": ["pdf", "docx"],
+                "blurb": "Tighter type with dates on the same line, to keep a long history on one page."},
+    "executive": {"group": "ats", "label": "Executive", "formats": ["pdf", "docx"],
+                  "blurb": "Serif with a large name and navy headings. Management and senior roles."},
+    "technical": {"group": "ats", "label": "Technical", "formats": ["pdf", "docx"],
+                  "blurb": "Monospace with dashed rules. Developer and engineering roles."},
+    # --- drawn layouts: PDF only (Word cannot hold them faithfully) ---
+    "modern": {"group": "graphic", "label": "Modern", "formats": ["pdf"],
+               "blurb": "Navy header with your photo, light sidebar and skill bars, orange accents."},
+    "midnight": {"group": "graphic", "label": "Midnight", "formats": ["pdf"],
+                 "blurb": "Dark sidebar topped by a large round photo, teal accents, skill bars."},
+    "banner": {"group": "graphic", "label": "Banner", "formats": ["pdf"],
+               "blurb": "Teal banner with a square photo, details column on the right, level dots."},
+    "timeline": {"group": "graphic", "label": "Timeline", "formats": ["pdf"],
+                 "blurb": "Photo beside the name, experience on a vertical timeline, skills as tags, purple accents."},
+    "elegant": {"group": "graphic", "label": "Elegant", "formats": ["pdf"],
+                "blurb": "Charcoal and gold: your photo as a framed portrait, a fine header rule and a tinted side card for skills and education."},
+}
+DEFAULT_TEMPLATE = "ats"
+VIEWER_TEMPLATE = "modern"   # what a visitor sees in the read-only viewer: it is for people, not parsers
 
 
 def _month_year(day):
@@ -77,7 +106,7 @@ def collect(track, site_url):
         if url:
             links.append((label, url))
 
-    experience, education, skills, certificates = [], [], {}, []
+    experience, education, skills, certificates, ratings = [], [], {}, [], []
     if about:
         for job in sorted(about.resume.all(), key=lambda r: (r.end_year, r.start_year), reverse=True):
             experience.append({
@@ -97,6 +126,7 @@ def collect(track, site_url):
                 certificates.append((school.school_name, school.certificate_link))
         for skill in sorted(about.proficiency.all(), key=lambda p: (-p.skill_range, p.skill_name)):
             skills.setdefault(level_for(skill.skill_range), []).append(skill.skill_name)
+            ratings.append((skill.skill_name, skill.skill_range))
             if skill.certificate_link:
                 certificates.append((skill.skill_name, skill.certificate_link))
 
@@ -110,6 +140,7 @@ def collect(track, site_url):
         "name": name,
         "portfolio": track.name,
         "headline": headline,
+        "photo_url": track.display_pic or profile.display_pic,
         "contact": contact,
         "links": links,
         "summary": (about.description if about else "").strip(),
@@ -117,13 +148,15 @@ def collect(track, site_url):
         "education": education,
         # strongest first, in the order of LEVELS
         "skills": [(label, skills[label]) for _, label in LEVELS if label in skills],
+        "skill_ratings": ratings,   # strongest first, for the designed layout's bars
         "projects": projects,
         "certificates": certificates,
     }
 
 
-def file_stem(data):
-    return f"{_file_part(data['name'])}_{_file_part(data['portfolio'])}_Resume"
+def file_stem(data, template=DEFAULT_TEMPLATE):
+    stem = f"{_file_part(data['name'])}_{_file_part(data['portfolio'])}_Resume"
+    return stem if template == DEFAULT_TEMPLATE else f"{stem}_{template.capitalize()}"
 
 
 def digest(data):
@@ -132,108 +165,15 @@ def digest(data):
 
 # ---------------------------------------------------------------- PDF --------
 
-def _pdf_safe(text):
-    """Standard PDF fonts cover Western European text. Each character outside
-    that set is simplified on its own (accent dropped, e.g. a dotted O becomes
-    O) or shown as ?, rather than turned into a box or an error - and the
-    characters that are fine are left exactly as written."""
-    text = (text or "").replace("\u2019", "'").replace("\u201c", '"').replace("\u201d", '"')
-    out = []
-    for char in text:
-        try:
-            char.encode("cp1252")
-            out.append(char)
-            continue
-        except UnicodeEncodeError:
-            pass
-        base = "".join(c for c in unicodedata.normalize("NFKD", char) if not unicodedata.combining(c))
-        try:
-            base.encode("cp1252")
-            out.append(base or "?")
-        except UnicodeEncodeError:
-            out.append("?")
-    return "".join(out)
+def _bottom_border(paragraph):
+    """A thin line under a heading (a Word paragraph border)."""
+    borders = OxmlElement("w:pBdr")
+    bottom = OxmlElement("w:bottom")
+    for key, value in (("w:val", "single"), ("w:sz", "6"), ("w:space", "1"), ("w:color", "111111")):
+        bottom.set(qn(key), value)
+    borders.append(bottom)
+    paragraph._p.get_or_add_pPr().append(borders)
 
-
-def _p(text):
-    return escape(_pdf_safe(text))
-
-
-def _link(url):
-    safe = escape(_pdf_safe(url))
-    return f'<link href="{safe}" color="#1a4fa0">{safe}</link>'
-
-
-def render_pdf(data):
-    ink, grey = colors.HexColor("#111111"), colors.HexColor("#555555")
-    base = ParagraphStyle("base", fontName="Helvetica", fontSize=10, leading=13.5, textColor=ink)
-    styles = {
-        "name": ParagraphStyle("name", parent=base, fontName="Helvetica-Bold", fontSize=21, leading=25),
-        "headline": ParagraphStyle("headline", parent=base, fontSize=11.5, leading=15, textColor=grey, spaceAfter=3),
-        "small": ParagraphStyle("small", parent=base, fontSize=9.5, leading=13),
-        "h": ParagraphStyle("h", parent=base, fontName="Helvetica-Bold", fontSize=10.5, leading=14, spaceBefore=9),
-        "role": ParagraphStyle("role", parent=base, fontName="Helvetica-Bold", spaceBefore=4),
-        "meta": ParagraphStyle("meta", parent=base, fontSize=9, textColor=grey),
-        "bullet": ParagraphStyle("bullet", parent=base, leftIndent=12, bulletIndent=2, spaceBefore=1),
-    }
-
-    def heading(title):
-        return [
-            Paragraph(title, styles["h"]),
-            HRFlowable(width="100%", thickness=0.6, color=colors.HexColor("#999999"), spaceBefore=1, spaceAfter=3),
-        ]
-
-    def bullet(text):
-        return Paragraph(_p(text), styles["bullet"], bulletText="•")
-
-    story = [Paragraph(_p(data["name"]), styles["name"]), Paragraph(_p(data["headline"]), styles["headline"])]
-    if data["contact"]:
-        story.append(Paragraph(_p("  |  ".join(data["contact"])), styles["small"]))
-    if data["links"]:
-        story.append(Paragraph("  |  ".join(f"{_p(label)}: {_link(url)}" for label, url in data["links"]), styles["small"]))
-
-    if data["summary"]:
-        story += heading("PROFESSIONAL SUMMARY") + [Paragraph(_p(data["summary"]), base)]
-
-    if data["skills"]:
-        story += heading("SKILLS")
-        story += [Paragraph(f"<b>{_p(label)}:</b> {_p(', '.join(names))}", base) for label, names in data["skills"]]
-
-    if data["experience"]:
-        story += heading("PROFESSIONAL EXPERIENCE")
-        for job in data["experience"]:
-            block = [Paragraph(f"{_p(job['title'])} | {_p(job['company'])}", styles["role"]), Paragraph(_p(job["period"]), styles["meta"])]
-            block += [bullet(b) for b in job["bullets"]]
-            story.append(KeepTogether(block))
-
-    if data["education"]:
-        story += heading("EDUCATION")
-        for school in data["education"]:
-            title = _p(school["school"]) if not school["degree"] else f"{_p(school['degree'])} | {_p(school['school'])}"
-            block = [Paragraph(title, styles["role"]), Paragraph(_p(school["period"]), styles["meta"])]
-            block += [bullet(b) for b in school["bullets"]]
-            story.append(KeepTogether(block))
-
-    if data["projects"]:
-        story += heading("PROJECTS")
-        for project in data["projects"]:
-            story.append(Paragraph(f"<b>{_p(project['name'])}</b> ({_p(project['category'])}): {_link(project['link'])}", styles["bullet"], bulletText="•"))
-
-    if data["certificates"]:
-        story += heading("CERTIFICATES")
-        for label, url in data["certificates"]:
-            story.append(Paragraph(f"{_p(label)}: {_link(url)}", styles["bullet"], bulletText="•"))
-
-    story.append(Spacer(1, 2))
-    buffer = io.BytesIO()
-    SimpleDocTemplate(
-        buffer, pagesize=A4, leftMargin=18 * mm, rightMargin=18 * mm, topMargin=15 * mm, bottomMargin=15 * mm,
-        title=f"{data['name']} - Resume", author=data["name"], subject=data["headline"],
-    ).build(story)
-    return buffer.getvalue()
-
-
-# --------------------------------------------------------------- Word --------
 
 def _hyperlink(paragraph, url, text):
     r_id = paragraph.part.relate_to(
@@ -257,7 +197,9 @@ def _hyperlink(paragraph, url, text):
     paragraph._p.append(link)
 
 
-def render_docx(data):
+def _docx_document(data, style):
+    font, centered, rule = style["font"], style["centered"], style["rule"]
+    tight, head_color = style.get("tight", False), style.get("color")
     doc = Document()
     section = doc.sections[0]
     section.page_width, section.page_height = Mm(210), Mm(297)
@@ -265,34 +207,40 @@ def render_docx(data):
     section.top_margin = section.bottom_margin = Mm(15)
 
     normal = doc.styles["Normal"]
-    normal.font.name, normal.font.size = "Calibri", Pt(10.5)
-    normal.paragraph_format.space_after = Pt(2)
+    normal.font.name, normal.font.size = font, Pt(style["size"])
+    normal.paragraph_format.space_after = Pt(1 if tight else 2)
     # real Word heading styles are what ATS and screen readers key on
     heading_style = doc.styles["Heading 1"]
-    heading_style.font.name, heading_style.font.size = "Calibri", Pt(11)
+    heading_style.font.name, heading_style.font.size = font, Pt(11)
     heading_style.font.bold = True
-    heading_style.font.color.rgb = RGBColor(0x11, 0x11, 0x11)
-    heading_style.paragraph_format.space_before, heading_style.paragraph_format.space_after = Pt(10), Pt(3)
+    heading_style.font.color.rgb = RGBColor.from_string(head_color) if head_color else RGBColor(0x11, 0x11, 0x11)
+    heading_style.paragraph_format.space_before, heading_style.paragraph_format.space_after = (Pt(6), Pt(2)) if tight else (Pt(10), Pt(3))
 
     props = doc.core_properties
     props.title, props.author, props.subject = f"{data['name']} - Resume", data["name"], data["headline"]
 
     title = doc.add_paragraph(style="Title")
     run = title.add_run(data["name"])
-    run.font.size, run.font.bold, run.font.name = Pt(21), True, "Calibri"
+    run.font.size, run.font.bold, run.font.name = Pt(style["name_size"]), True, font
     run.font.color.rgb = RGBColor(0x11, 0x11, 0x11)
-    title.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    doc.add_paragraph(data["headline"])
+    align = WD_ALIGN_PARAGRAPH.CENTER if centered else WD_ALIGN_PARAGRAPH.LEFT
+    title.alignment = align
+    doc.add_paragraph(data["headline"]).alignment = align
     if data["contact"]:
-        doc.add_paragraph("  |  ".join(data["contact"]))
+        doc.add_paragraph("  |  ".join(data["contact"])).alignment = align
     if data["links"]:
         links = doc.add_paragraph()
+        links.alignment = align
         for index, (label, url) in enumerate(data["links"]):
             links.add_run(("  |  " if index else "") + f"{label}: ")
             _hyperlink(links, url, url)
 
     def heading(text):
-        doc.add_heading(text, level=1)
+        paragraph = doc.add_heading(text, level=1)
+        if centered:
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        if rule:
+            _bottom_border(paragraph)
 
     def role(left, right, dates):
         paragraph = doc.add_paragraph()
@@ -344,9 +292,129 @@ def render_docx(data):
     return buffer.getvalue()
 
 
+# --------------------------------------------------- the other designs ---------
+
+# ----------------------------------------------- the five plain (ATS) designs -----
+
+# Plain designs differ only in the ways a parser does not care about: typeface,
+# alignment, density, how headings are drawn, and where dates sit. Every one is a
+# single column of real text with no tables, images or icons.
+PLAIN_STYLES = {
+    "ats": dict(font="Helvetica", bold="Helvetica-Bold", italic="Helvetica-Oblique", size=10, leading=13.5, name_size=21,
+                align="left", head="rule", accent="#111111", date="below", job="title_company", margin_x=18, margin_y=15, space=1.0),
+    "classic": dict(font="Times-Roman", bold="Times-Bold", italic="Times-Italic", size=10.5, leading=14, name_size=24,
+                    align="center", head="double", accent="#1a1a1a", date="below", job="company_title", margin_x=20, margin_y=16, space=1.0),
+    "compact": dict(font="Helvetica", bold="Helvetica-Bold", italic="Helvetica-Oblique", size=9.2, leading=11.9, name_size=18,
+                    align="left", head="rule", accent="#111111", date="inline", job="title_company", margin_x=14, margin_y=12, space=0.55),
+    "executive": dict(font="Times-Roman", bold="Times-Bold", italic="Times-Italic", size=10.5, leading=14.5, name_size=27,
+                      align="left", head="color", accent="#1f3a5f", date="below", job="title_company", margin_x=20, margin_y=18, space=1.15),
+    "technical": dict(font="Courier", bold="Courier-Bold", italic="Courier-Oblique", size=8.6, leading=12, name_size=17,
+                      align="left", head="dashed", accent="#111111", date="below", job="title_company", margin_x=16, margin_y=14, space=0.9),
+}
+
+DOCX_STYLES = {
+    "ats": dict(font="Calibri", size=10.5, centered=False, rule=False, name_size=21),
+    "classic": dict(font="Times New Roman", size=11, centered=True, rule=True, name_size=22),
+    "compact": dict(font="Arial", size=9.5, centered=False, rule=False, name_size=17, tight=True),
+    "executive": dict(font="Georgia", size=11, centered=False, rule=True, name_size=25, color="1F3A5F"),
+    "technical": dict(font="Consolas", size=9, centered=False, rule=False, name_size=16),
+}
+
+
+def _pdf_plain(data, style):
+    sp = style["space"]
+    ink, grey, accent = colors.HexColor("#1a1a1a"), colors.HexColor("#555555"), colors.HexColor(style["accent"])
+    align = TA_CENTER if style["align"] == "center" else TA_LEFT
+    base = ParagraphStyle("base", fontName=style["font"], fontSize=style["size"], leading=style["leading"], textColor=ink)
+    st = {
+        "name": ParagraphStyle("name", parent=base, fontName=style["bold"], fontSize=style["name_size"], leading=style["name_size"] * 1.18,
+                               alignment=align, textColor=accent if style["head"] == "color" else ink),
+        "headline": ParagraphStyle("headline", parent=base, fontName=style["italic"] if style["font"] != "Helvetica" else style["font"],
+                                   fontSize=style["size"] + 1.5, leading=style["leading"] + 2, alignment=align, textColor=grey, spaceAfter=3 * sp),
+        "contact": ParagraphStyle("contact", parent=base, fontSize=style["size"] - 0.5, alignment=align),
+        "h": ParagraphStyle("h", parent=base, fontName=style["bold"], fontSize=style["size"] + 1, leading=style["leading"] + 1,
+                            spaceBefore=9 * sp, alignment=align, textColor=accent if style["head"] == "color" else ink),
+        "role": ParagraphStyle("role", parent=base, spaceBefore=4 * sp),
+        "meta": ParagraphStyle("meta", parent=base, fontSize=style["size"] - 1, textColor=grey,
+                               fontName=style["italic"] if style["font"] == "Times-Roman" else style["font"]),
+        "bullet": ParagraphStyle("bullet", parent=base, leftIndent=12, bulletIndent=2, spaceBefore=1 * sp),
+    }
+
+    def heading(title):
+        rules = {
+            "rule": [HRFlowable(width="100%", thickness=0.6, color=colors.HexColor("#999999"), spaceBefore=1, spaceAfter=3 * sp)],
+            "double": [HRFlowable(width="100%", thickness=1, color=ink, spaceBefore=1, spaceAfter=1),
+                       HRFlowable(width="100%", thickness=0.3, color=ink, spaceBefore=0, spaceAfter=4 * sp)],
+            "color": [HRFlowable(width="100%", thickness=1.2, color=accent, spaceBefore=1, spaceAfter=3 * sp)],
+            "dashed": [HRFlowable(width="100%", thickness=0.7, color=ink, dash=(3, 2), spaceBefore=1, spaceAfter=3 * sp)],
+        }[style["head"]]
+        return [Paragraph(title, st["h"])] + rules
+
+    def bullet(text):
+        return Paragraph(_p(text), st["bullet"], bulletText="\u2022")
+
+    def entry(first, second, period, bullets):
+        """first / second: the two halves of the heading line, in this design's order."""
+        if style["job"] == "company_title" and second:
+            line = f"<b>{_p(second)}</b>, <i>{_p(first)}</i>"
+        else:
+            line = f"<b>{_p(first)}</b>" + (f" | {_p(second)}" if second else "")
+        if style["date"] == "inline":
+            return KeepTogether([Paragraph(f"{line} | {_p(period)}", st["role"])] + [bullet(b) for b in bullets])
+        return KeepTogether([Paragraph(line, st["role"]), Paragraph(_p(period), st["meta"])] + [bullet(b) for b in bullets])
+
+    story = [Paragraph(_p(data["name"]), st["name"]), Paragraph(_p(data["headline"]), st["headline"])]
+    if data["contact"]:
+        story.append(Paragraph(_p("  |  ".join(data["contact"])), st["contact"]))
+    if data["links"]:
+        story.append(Paragraph("  |  ".join(f"{_p(label)}: {_link(url)}" for label, url in data["links"]), st["contact"]))
+
+    if data["summary"]:
+        story += heading("PROFESSIONAL SUMMARY") + [Paragraph(_p(data["summary"]), base)]
+    if data["skills"]:
+        story += heading("SKILLS")
+        story += [Paragraph(f"<b>{_p(label)}:</b> {_p(', '.join(names))}", base) for label, names in data["skills"]]
+    if data["experience"]:
+        story += heading("PROFESSIONAL EXPERIENCE")
+        story += [entry(job["title"], job["company"], job["period"], job["bullets"]) for job in data["experience"]]
+    if data["education"]:
+        story += heading("EDUCATION")
+        for school in data["education"]:
+            story.append(entry(school["degree"] or school["school"], school["school"] if school["degree"] else "", school["period"], school["bullets"]))
+    if data["projects"]:
+        story += heading("PROJECTS")
+        for project in data["projects"]:
+            story.append(Paragraph(f"<b>{_p(project['name'])}</b> ({_p(project['category'])}): {_link(project['link'])}", st["bullet"], bulletText="\u2022"))
+    if data["certificates"]:
+        story += heading("CERTIFICATES")
+        for label, url in data["certificates"]:
+            story.append(Paragraph(f"{_p(label)}: {_link(url)}", st["bullet"], bulletText="\u2022"))
+
+    buffer = io.BytesIO()
+    SimpleDocTemplate(
+        buffer, pagesize=A4, leftMargin=style["margin_x"] * mm, rightMargin=style["margin_x"] * mm,
+        topMargin=style["margin_y"] * mm, bottomMargin=style["margin_y"] * mm,
+        title=f"{data['name']} - Resume", author=data["name"], subject=data["headline"],
+    ).build(story)
+    return buffer.getvalue()
+
+
+def render_pdf(data, template=DEFAULT_TEMPLATE):
+    if template in PLAIN_STYLES:
+        return _pdf_plain(data, PLAIN_STYLES[template])
+    from . import resume_graphics
+    return resume_graphics.DESIGNS[template](data)
+
+
+def render_docx(data, template=DEFAULT_TEMPLATE):
+    if template not in DOCX_STYLES:
+        raise ValueError(f"The {template} design is not available as a Word file")
+    return _docx_document(data, DOCX_STYLES[template])
+
+
 # -------------------------------------------------- read-only page images -----
 
-def render_pages(pdf_bytes):
+def render_pages(pdf_bytes, dpi=130, first_only=False):
     """One PNG per PDF page. They carry no text layer, so there is nothing to
     select or copy; a small footer marks them as a preview copy."""
     pages = []
@@ -357,22 +425,22 @@ def render_pages(pdf_bytes):
                 pymupdf.Point(rect.width / 2 - 38, rect.height - 16), "Read-only preview",
                 fontsize=7.5, color=(0.62, 0.62, 0.62),
             )
-            pages.append(page.get_pixmap(dpi=130).tobytes("png"))
+            pages.append(page.get_pixmap(dpi=dpi).tobytes("png"))
+            if first_only:
+                break
     return pages
 
 
 # ----------------------------------------------------------- cached access ----
 
-# looked up by name at call time (not bound here) so the renderers can be swapped out in tests
-_BUILDERS = {
-    "pdf": lambda data: render_pdf(data),
-    "docx": lambda data: render_docx(data),
-}
-
-
-def cached(kind, track, data):
-    """The file for this exact content (and day: 'Present' depends on it); edits change the key."""
-    key = f"resume:{kind}:{track.pk}:{digest(data)}"
+def cached(kind, track, data, template=DEFAULT_TEMPLATE):
+    """The file for this exact content, design and day ('Present' depends on it); edits change the key.
+    kind: pdf | docx | pages (all page images) | thumb (first page, small, for the picker)."""
+    key = f"resume:{kind}:{template}:{track.pk}:{digest(data)}"
     if kind == "pages":
-        return cache.get_or_set(key, lambda: render_pages(cached("pdf", track, data)), CACHE_SECONDS)
-    return cache.get_or_set(key, lambda: _BUILDERS[kind](data), CACHE_SECONDS)
+        return cache.get_or_set(key, lambda: render_pages(cached("pdf", track, data, template)), CACHE_SECONDS)
+    if kind == "thumb":
+        return cache.get_or_set(key, lambda: render_pages(cached("pdf", track, data, template), dpi=48, first_only=True)[0], CACHE_SECONDS)
+    if kind == "pdf":
+        return cache.get_or_set(key, lambda: render_pdf(data, template), CACHE_SECONDS)
+    return cache.get_or_set(key, lambda: render_docx(data, template), CACHE_SECONDS)
