@@ -25,6 +25,7 @@ from reportlab.platypus import (
     NextPageTemplate, PageTemplate, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
 )
 
+from . import resume_mark
 from .resume_photo import fetch_photo, fetch_thumbnails
 from .resume_text import level_for, link, p, pdf_safe, short_url
 
@@ -428,6 +429,7 @@ def _sidebar(data, theme_key):
     name_size = _name_font(data["name"], name_room)
 
     def first_page(canvas, doc):
+        resume_mark.draw_on_page(canvas, PAGE_W, PAGE_H)
         canvas.saveState()
         canvas.setFillColor(_hex(t["side_bg"]))
         canvas.rect(side_x0, 0, side_w, PAGE_H - band_h, stroke=0, fill=1)
@@ -452,6 +454,7 @@ def _sidebar(data, theme_key):
             portrait.draw(canvas, side_w / 2 - 20 * mm, PAGE_H - 12 * mm - 40 * mm, 40 * mm, "circle", ring, ring_width=1.6 * mm, fallback=accent)
 
     def later_page(canvas, doc):
+        resume_mark.draw_on_page(canvas, PAGE_W, PAGE_H)
         canvas.saveState()
         canvas.setFillColor(_hex(t["band"] or t["side_bg"]))
         canvas.rect(0, PAGE_H - 14 * mm, PAGE_W, 14 * mm, stroke=0, fill=1)
@@ -543,6 +546,7 @@ def _timeline(data):
     st = _styles(ink, muted, accent)
 
     def first_page(canvas, doc):
+        resume_mark.draw_on_page(canvas, PAGE_W, PAGE_H)
         canvas.saveState()
         canvas.setFillColor(accent)
         canvas.rect(0, PAGE_H - 4 * mm, PAGE_W, 4 * mm, stroke=0, fill=1)
@@ -550,6 +554,7 @@ def _timeline(data):
         portrait.draw(canvas, 16 * mm, head_top - photo, photo, "circle", accent, ring_width=1.4 * mm, fallback=accent)
 
     def later_page(canvas, doc):
+        resume_mark.draw_on_page(canvas, PAGE_W, PAGE_H)
         canvas.saveState()
         canvas.setFillColor(accent)
         canvas.rect(0, PAGE_H - 4 * mm, PAGE_W, 4 * mm, stroke=0, fill=1)
@@ -629,6 +634,7 @@ def _elegant(data):
     card_meta = ParagraphStyle("card_meta", parent=st["meta"], fontSize=8.2)
 
     def first_page(canvas, doc):
+        resume_mark.draw_on_page(canvas, PAGE_W, PAGE_H)
         canvas.saveState()
         canvas.setFillColor(ink)
         canvas.rect(0, PAGE_H - 3 * mm, PAGE_W, 3 * mm, stroke=0, fill=1)
@@ -641,6 +647,7 @@ def _elegant(data):
         portrait.draw_framed(canvas, margin, head_top - photo_h, photo_w, photo_h, gold, fallback=ink)
 
     def later_page(canvas, doc):
+        resume_mark.draw_on_page(canvas, PAGE_W, PAGE_H)
         canvas.saveState()
         canvas.setFillColor(ink)
         canvas.rect(0, PAGE_H - 3 * mm, PAGE_W, 3 * mm, stroke=0, fill=1)

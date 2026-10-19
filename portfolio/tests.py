@@ -1226,7 +1226,7 @@ class ProjectSharingMigrationTests(TransactionTestCase):
 import docx
 import pymupdf
 
-from portfolio import resume_builder, resume_photo
+from portfolio import resume_builder, resume_mark, resume_photo
 
 TODAY = date(2026, 10, 18)
 
@@ -1240,6 +1240,17 @@ def make_jpeg(size=(300, 400), colour=(120, 80, 60)):
     out = io.BytesIO()
     Image.new("RGB", size, colour).save(out, "JPEG")
     return out.getvalue()
+
+
+def pictures(page):
+    """The page's pictures other than the faint logo watermark every resume page carries."""
+    mark_size = resume_mark.faint_logo()[1:]
+    return [info for info in page.get_image_info() if (info["width"], info["height"]) != mark_size]
+
+
+def has_watermark(page):
+    mark_size = resume_mark.faint_logo()[1:]
+    return sum((info["width"], info["height"]) == mark_size for info in page.get_image_info()) == 1
 
 
 def pdf_text(blob):
@@ -1505,7 +1516,8 @@ class ResumeExportTests(APITestCase):
             self.assertEqual(doc.metadata["author"], "Sulaimon Lawal")
             fonts = set()
             for page in doc:
-                self.assertEqual(page.get_images(), [], "no pictures: nothing for a parser to trip on")
+                self.assertEqual(pictures(page), [], "no pictures of its own: nothing for a parser to trip on")
+                self.assertTrue(has_watermark(page), "just the faint logo behind the text")
                 self.assertEqual(page.find_tables().tables, [], "no tables")
                 fonts |= {f[3] for f in page.get_fonts()}
                 lefts = [round(b[0]) for b in page.get_text("blocks") if b[4].strip()]
@@ -1654,7 +1666,8 @@ class ResumeExportTests(APITestCase):
                     self.assertEqual(order, sorted(order), key)
                     fonts = set()
                     for page in doc:
-                        self.assertEqual(page.get_images(), [], f"{key}: no pictures")
+                        self.assertEqual(pictures(page), [], f"{key}: no pictures of its own")
+                        self.assertTrue(has_watermark(page), f"{key}: the faint logo is behind the text")
                         self.assertEqual(page.find_tables().tables, [], f"{key}: no tables")
                         fonts |= {f[3] for f in page.get_fonts()}
                         boxes = [b for b in page.get_text("blocks") if b[4].strip()]
@@ -1694,7 +1707,7 @@ class ResumeExportTests(APITestCase):
                 res = self.get("full-stack", "download/pdf", key)
                 self.assertEqual(res.status_code, 200, res.content[:200])
                 with pymupdf.open(stream=res.content, filetype="pdf") as doc:
-                    self.assertEqual(len(doc[0].get_images()), 2, f"{key}: the photo and the project's thumbnail are on page one")
+                    self.assertEqual(len(pictures(doc[0])), 2, f"{key}: the photo and the project's thumbnail are on page one")
                     text = doc[0].get_text()
                     for needle in ("Sulaimon Lawal", "fs@example.com", "Rust", "Pio Tech", "Ahmadu Bello University", "Shop",
                                    "A small online shop with a cart and card payments.", "shop.example.com"):
@@ -1705,7 +1718,7 @@ class ResumeExportTests(APITestCase):
         spots = {}
         for key in GRAPHIC_DESIGNS:
             with pymupdf.open(stream=self.get("full-stack", "download/pdf", key).content, filetype="pdf") as doc:
-                boxes = [doc[0].get_image_rects(img[0])[0] for img in doc[0].get_images()]
+                boxes = [pymupdf.Rect(info["bbox"]) for info in pictures(doc[0])]
                 box = next(b for b in boxes if abs(b.width / b.height - 4 / 3) > 0.05)   # the photo, not a 4:3 thumbnail
                 spots[key] = (round(box.x0 / doc[0].rect.width, 1), round(box.y0 / doc[0].rect.height, 1), round(box.width))
         self.assertEqual(len(set(spots.values())), 5, spots)
@@ -1723,7 +1736,7 @@ class ResumeExportTests(APITestCase):
                 res = self.get("full-stack", "download/pdf", key)
                 self.assertEqual(res.status_code, 200)
                 with pymupdf.open(stream=res.content, filetype="pdf") as doc:
-                    self.assertEqual(len(doc[0].get_images()), 1, f"{key}: only the project thumbnail is left")
+                    self.assertEqual(len(pictures(doc[0])), 1, f"{key}: only the project thumbnail is left")
                     self.assertIn("SL", doc[0].get_text().split(), key)
 
     def test_unknown_design_is_rejected_everywhere(self):
@@ -1783,7 +1796,7 @@ class ResumeExportTests(APITestCase):
             with self.subTest(key):
                 with pymupdf.open(stream=self.card_pdf(key), filetype="pdf") as doc:
                     text = "".join(page.get_text() for page in doc)
-                    images = sum(len(page.get_images()) for page in doc)
+                    images = sum(len(pictures(page)) for page in doc)
                     uris = {l["uri"] for page in doc for l in page.get_links() if l["kind"] == pymupdf.LINK_URI}
                     self.assertEqual(images, 3, f"{key}: the photo and two thumbnails")
                     for needle in ("Shop", "A small online shop with a cart and card payments.", "Fence Lamp", "Lights a fence line at dusk."):
@@ -1801,7 +1814,7 @@ class ResumeExportTests(APITestCase):
                     self.assertIn("Shop", text)
                     self.assertIn("shop.example.com", text)
                     self.assertNotIn("None", text)
-                    self.assertEqual(len(doc[0].get_images()), 2)
+                    self.assertEqual(len(pictures(doc[0])), 2)
 
     def test_a_project_whose_thumbnail_cannot_be_fetched_gets_a_plain_tile(self):
         self.fetch_thumbnails.side_effect = lambda urls: {u: None for u in urls}
@@ -1809,7 +1822,7 @@ class ResumeExportTests(APITestCase):
             with self.subTest(key):
                 with pymupdf.open(stream=self.card_pdf(key), filetype="pdf") as doc:
                     text = doc[0].get_text()
-                    self.assertEqual(len(doc[0].get_images()), 1, f"{key}: just the photo")
+                    self.assertEqual(len(pictures(doc[0])), 1, f"{key}: just the photo")
                     self.assertIn("A small online shop", text)
                     self.assertIn("S", text.split(), f"{key}: the tile carries the project's first letter")
 
@@ -1862,7 +1875,7 @@ class ResumeExportTests(APITestCase):
                     text = "".join(page.get_text() for page in doc)
                     self.assertIn("Shop (WebDev): https://shop.example.com", text, key)
                     self.assertIn("A small online shop with a cart and card payments.", text, key)
-                    self.assertTrue(all(page.get_images() == [] for page in doc), f"{key}: no thumbnail")
+                    self.assertTrue(all(pictures(page) == [] for page in doc), f"{key}: no thumbnail")
                 word = docx.Document(io.BytesIO(self.get("full-stack", "download/docx", key).content))
                 joined = "\n".join(p.text for p in word.paragraphs)
                 self.assertIn("A small online shop with a cart and card payments.", joined, key)
@@ -1910,6 +1923,83 @@ class ResumeExportTests(APITestCase):
         self.client.patch(f"{API}/portfolio/{copy.items.get(name='Shop').id}", {"description": "Changed in the copy."}, format="json")
         self.shop.refresh_from_db()
         self.assertEqual(self.shop.description, "Kept.")
+
+    # --- the logo watermark ------------------------------------------------------------------------
+
+    def test_every_page_of_every_design_carries_the_faint_logo(self):
+        for i in range(30):
+            make_project(self.fs, category="WebDev", name=f"Filler {i}", thumbnail=f"https://a.com/f{i}.png", project_link=f"https://f{i}.example.com")
+        for i in range(25):
+            Resume.objects.create(about=self.fs.about, post=f"Role {i}", company_name=f"Company {i}", start_year=date(2010, 1, 1),
+                                  end_year=date(2011, 1, 1), description="Did a thing.\nDid another thing.")
+        for key in ATS_DESIGNS + GRAPHIC_DESIGNS:
+            with self.subTest(key):
+                with pymupdf.open(stream=self.get("full-stack", "download/pdf", key).content, filetype="pdf") as doc:
+                    self.assertGreaterEqual(len(doc), 2)
+                    for number, page in enumerate(doc, 1):
+                        self.assertTrue(has_watermark(page), f"{key}: page {number}")
+
+    def test_the_watermark_is_a_picture_behind_the_text_and_changes_nothing_in_the_text(self):
+        for key in ATS_DESIGNS + GRAPHIC_DESIGNS:
+            with self.subTest(key):
+                with_mark = self.get("full-stack", "download/pdf", key).content
+                cache.clear()
+                with mock.patch.object(resume_mark, "draw_on_page"):
+                    without = self.get("full-stack", "download/pdf", key).content
+                cache.clear()
+                self.assertNotEqual(with_mark, without)
+                self.assertEqual(pdf_text(with_mark), pdf_text(without), f"{key}: the text layer and its order are untouched")
+                with pymupdf.open(stream=with_mark, filetype="pdf") as doc:
+                    info = next(i for i in doc[0].get_image_info() if (i["width"], i["height"]) == resume_mark.faint_logo()[1:])
+                    box = pymupdf.Rect(info["bbox"])
+                    self.assertAlmostEqual((box.x0 + box.x1) / 2, doc[0].rect.width / 2, delta=2)
+                    self.assertAlmostEqual((box.y0 + box.y1) / 2, doc[0].rect.height / 2, delta=2)
+                    self.assertGreater(box.width, doc[0].rect.width * 0.5, "big")
+                    self.assertNotEqual(tuple(round(v, 3) for v in info["transform"][1:3]), (0.0, 0.0), "slanted")
+
+    def test_the_logo_is_faint_and_grey_so_it_cannot_drown_the_text(self):
+        data, width, height = resume_mark.faint_logo()
+        from PIL import Image
+        image = Image.open(io.BytesIO(data))
+        self.assertEqual((image.mode, image.size), ("RGBA", (width, height)))
+        alphas = list(image.getchannel("A").getdata())
+        self.assertLessEqual(max(alphas), 30, "at most about 12% opaque")
+        self.assertGreater(max(alphas), 0)
+        self.assertEqual({px[:3] for px in image.getdata() if px[3]}, {(110, 114, 123)}, "one mid-grey")
+
+    def test_word_files_have_the_logo_in_the_header_behind_the_text(self):
+        for key in ATS_DESIGNS:
+            with self.subTest(key):
+                document = docx.Document(io.BytesIO(self.get("full-stack", "download/docx", key).content))
+                header = document.sections[0].header
+                self.assertFalse(header.is_linked_to_previous)
+                xml = header._element.xml
+                self.assertIn("wp:anchor", xml)
+                self.assertIn('behindDoc="1"', xml, "behind the text")
+                self.assertIn("<wp:wrapNone/>", xml, "text does not flow around it")
+                self.assertIn('rot="-840000"', xml, "slanted 14 degrees")
+                self.assertIn("a:blip", xml)
+                self.assertEqual(len(document.inline_shapes), 0, "nothing inline in the resume body")
+                self.assertEqual(len(document.tables), 0)
+                headings = [p.text for p in document.paragraphs if p.style.name == "Heading 1"]
+                self.assertEqual(headings[0], "PROFESSIONAL SUMMARY", "the body and its headings are as before")
+                images = [part for part in header.part.related_parts.values() if getattr(part, "content_type", "").startswith("image/")]
+                self.assertEqual(len(images), 1)
+
+    def test_previews_and_the_visitor_viewer_show_the_watermark_too(self):
+        anon = APIClient(HTTP_HOST="localhost")
+        for key in ("ats", "modern"):
+            with self.subTest(key):
+                cache.clear()
+                with_mark = anon.get(self.url("full-stack", "pages/1.png") + f"?template={key}").content
+                thumb = anon.get(self.url("full-stack", "pages/1.png") + f"?template={key}&thumb=1").content
+                cache.clear()
+                with mock.patch.object(resume_mark, "draw_on_page"):
+                    without = anon.get(self.url("full-stack", "pages/1.png") + f"?template={key}").content
+                    thumb_without = anon.get(self.url("full-stack", "pages/1.png") + f"?template={key}&thumb=1").content
+                cache.clear()
+                self.assertNotEqual(with_mark, without, "the page image the visitor and the owner's preview show carries the mark")
+                self.assertNotEqual(thumb, thumb_without, "and so do the thumbnails")
 
     # --- picking a design in the viewer -----------------------------------------------------
 

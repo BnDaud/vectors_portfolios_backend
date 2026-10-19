@@ -31,6 +31,7 @@ from reportlab.platypus import (
     NextPageTemplate, PageTemplate, Paragraph, SimpleDocTemplate, Spacer,
 )
 
+from . import resume_mark
 from .resume_text import LEVELS, level_for, link as _link, p as _p, pdf_safe as _pdf_safe, short_url as _short_url  # noqa: F401
 
 CACHE_SECONDS = 3600
@@ -294,6 +295,7 @@ def _docx_document(data, style):
             line.add_run(f"{label}: ")
             _hyperlink(line, url, url)
 
+    resume_mark.add_to_docx(doc)
     buffer = io.BytesIO()
     doc.save(buffer)
     return buffer.getvalue()
@@ -326,6 +328,10 @@ DOCX_STYLES = {
     "executive": dict(font="Georgia", size=11, centered=False, rule=True, name_size=25, color="1F3A5F"),
     "technical": dict(font="Consolas", size=9, centered=False, rule=False, name_size=16),
 }
+
+
+def _mark_page(canvas, doc):
+    resume_mark.draw_on_page(canvas, *A4)
 
 
 def _pdf_plain(data, style):
@@ -403,7 +409,7 @@ def _pdf_plain(data, style):
         buffer, pagesize=A4, leftMargin=style["margin_x"] * mm, rightMargin=style["margin_x"] * mm,
         topMargin=style["margin_y"] * mm, bottomMargin=style["margin_y"] * mm,
         title=f"{data['name']} - Resume", author=data["name"], subject=data["headline"],
-    ).build(story)
+    ).build(story, onFirstPage=_mark_page, onLaterPages=_mark_page)
     return buffer.getvalue()
 
 
