@@ -201,11 +201,13 @@ class PortfolioTrackSerial(ModelSerializer):
     username = CharField(write_only = True , required = False)
     copy_from = IntegerField(write_only = True , required = False , allow_null = True)
     copy_portfolio_items = BooleanField(write_only = True , required = False , default = False)
+    # instead of copying the projects, show the very same ones in the new portfolio (they become shared)
+    share_portfolio_items = BooleanField(write_only = True , required = False , default = False)
 
     class Meta:
         model = PortfolioTrack
         fields = ["id" , "name" , "slug" , "is_default" , "order" , "about" , "items" ,
-                  "username" , "copy_from" , "copy_portfolio_items" , "location"] + TRACK_CONTACT_FIELDS
+                  "username" , "copy_from" , "copy_portfolio_items" , "share_portfolio_items" , "location"] + TRACK_CONTACT_FIELDS
         extra_kwargs = {"slug": {"required": False}}
 
     @transaction.atomic
@@ -213,6 +215,7 @@ class PortfolioTrackSerial(ModelSerializer):
         username = validated_data.pop("username" , None)
         copy_from_id = validated_data.pop("copy_from" , None)
         copy_items = validated_data.pop("copy_portfolio_items" , False)
+        share_items = validated_data.pop("share_portfolio_items" , False)
 
         if not username:
             raise serializers.ValidationError({"username": "This field is required."})
@@ -261,8 +264,11 @@ class PortfolioTrackSerial(ModelSerializer):
                 Proficiency.objects.create(about = new_about , skill_name = p.skill_name ,
                                             skill_range = p.skill_range , certificate_link = p.certificate_link ,
                                             description = p.description)
-            if copy_items:
+            if copy_items or share_items:
                 for item in source.items.all():
+                    if share_items:      # the same projects, now shown here too
+                        item.tracks.add(track)
+                        continue
                     # a copy of the portfolio gets its own copies of the projects, independent of the originals
                     Portfolio.objects.create(category = item.category , name = item.name ,
                                              thumbnail = item.thumbnail , project_link = item.project_link ,
@@ -276,6 +282,7 @@ class PortfolioTrackSerial(ModelSerializer):
         validated_data.pop("username" , None)
         validated_data.pop("copy_from" , None)
         validated_data.pop("copy_portfolio_items" , None)
+        validated_data.pop("share_portfolio_items" , None)
 
         new_name = validated_data.get("name")
         if new_name and new_name != instance.name and "slug" not in validated_data:

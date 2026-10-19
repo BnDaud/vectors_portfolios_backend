@@ -1133,6 +1133,36 @@ class ProjectSharingTests(APITestCase):
         project.refresh_from_db()
         self.assertEqual(project.name, "Demo")
 
+    def test_a_new_portfolio_can_share_the_originals_projects_instead_of_copying_them(self):
+        project = self.add(share_with=[self.b.id])
+        res = self.client.post(f"{API}/tracks/", {"username": "owner", "name": "Linked", "copy_from": self.a.id, "share_portfolio_items": True}, format="json")
+        self.assertEqual(res.status_code, 201, res.content)
+        linked = PortfolioTrack.objects.get(pk=res.json()["id"])
+        self.assertEqual(Portfolio.objects.count(), 1, "no new project rows: the same ones")
+        self.assertEqual(self.shown_in(project), ["Alpha", "Beta", "Linked"])
+        self.assertEqual([i["name"] for i in res.json()["items"]], ["Demo"])
+        self.client.patch(f"{API}/portfolio/{linked.items.get().id}", {"name": "Edited in the new one"}, format="json")
+        project.refresh_from_db()
+        self.assertEqual(project.name, "Edited in the new one", "edit once, every portfolio changes")
+        self.assertEqual(self.client.delete(f"{API}/portfolio/{project.id}?from={linked.id}").status_code, 204)
+        self.assertEqual(self.shown_in(project), ["Alpha", "Beta"], "taking it out of the new portfolio leaves the others")
+
+    def test_copying_without_sharing_is_unchanged_and_neither_flag_copies_no_projects(self):
+        self.add(share_with=[self.b.id])
+        both_off = self.client.post(f"{API}/tracks/", {"username": "owner", "name": "Blank-ish", "copy_from": self.a.id}, format="json")
+        self.assertEqual(both_off.status_code, 201)
+        self.assertEqual(both_off.json()["items"], [])
+        copied = self.client.post(f"{API}/tracks/", {"username": "owner", "name": "Copied", "copy_from": self.a.id, "copy_portfolio_items": True}, format="json")
+        self.assertEqual(copied.status_code, 201)
+        self.assertEqual(Portfolio.objects.count(), 2, "a separate copy was made")
+        self.assertEqual(Portfolio.objects.get(pk=copied.json()["items"][0]["id"]).tracks.count(), 1, "and the copy is shown in the new portfolio only")
+
+    def test_asking_for_both_shares_rather_than_doubling_up(self):
+        self.add()
+        res = self.client.post(f"{API}/tracks/", {"username": "owner", "name": "Both", "copy_from": self.a.id, "copy_portfolio_items": True, "share_portfolio_items": True}, format="json")
+        self.assertEqual(res.status_code, 201)
+        self.assertEqual(Portfolio.objects.count(), 1)
+
     # --- the resume -------------------------------------------------------------------------------------
 
     @override_settings(SITE_URL="https://site.example")
