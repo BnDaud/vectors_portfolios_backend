@@ -131,7 +131,8 @@ def collect(track, site_url):
                 certificates.append((skill.skill_name, skill.certificate_link))
 
     projects = [
-        {"name": item.name, "category": item.category, "link": item.project_link}
+        {"name": item.name, "category": item.category, "link": item.project_link,
+         "description": item.description.strip(), "thumbnail": item.thumbnail}
         for item in track.items.all()
     ]
 
@@ -280,6 +281,9 @@ def _docx_document(data, style):
             line.add_run(project["name"]).bold = True
             line.add_run(f" ({project['category']}): ")
             _hyperlink(line, project["link"], project["link"])
+            if project["description"]:   # optional: a plain line under the link, no picture
+                line.add_run().add_break()
+                line.add_run(project["description"])
     if data["certificates"]:
         heading("CERTIFICATES")
         for label, url in data["certificates"]:
@@ -384,7 +388,8 @@ def _pdf_plain(data, style):
     if data["projects"]:
         story += heading("PROJECTS")
         for project in data["projects"]:
-            story.append(Paragraph(f"<b>{_p(project['name'])}</b> ({_p(project['category'])}): {_link(project['link'])}", st["bullet"], bulletText="\u2022"))
+            note = f"<br/>{_p(project['description'])}" if project["description"] else ""
+            story.append(Paragraph(f"<b>{_p(project['name'])}</b> ({_p(project['category'])}): {_link(project['link'])}{note}", st["bullet"], bulletText="\u2022"))
     if data["certificates"]:
         story += heading("CERTIFICATES")
         for label, url in data["certificates"]:

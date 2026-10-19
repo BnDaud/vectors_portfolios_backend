@@ -1,4 +1,5 @@
 import importlib
+import zlib
 import io
 import json
 from datetime import date, timedelta
@@ -983,7 +984,10 @@ class ResumePhotoTests(SimpleTestCase):
                     self.send_response(302); self.send_header("Location", "/loop"); self.end_headers(); return
                 status, kind, body = routes.get(self.path, (404, "text/plain", b"no"))
                 self.send_response(status); self.send_header("Content-Type", kind); self.send_header("Content-Length", str(len(body))); self.end_headers()
-                self.wfile.write(body)
+                try:
+                    self.wfile.write(body)
+                except (BrokenPipeError, ConnectionResetError):   # the fetcher gave up on a too-big picture, as it should
+                    pass
 
         cls.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         cls.base = f"http://127.0.0.1:{cls.server.server_address[1]}"
@@ -1014,6 +1018,26 @@ class ResumePhotoTests(SimpleTestCase):
         resume_photo.fetch_photo(f"{self.base}/gone.jpg"); resume_photo.fetch_photo(f"{self.base}/gone.jpg")
         self.assertEqual(sorted(self.hits), ["/gone.jpg", "/ok.jpg"])
 
+    def test_a_thumbnail_comes_back_as_a_four_by_three_jpeg(self):
+        from PIL import Image
+        raw = resume_photo.fetch_thumbnail(f"{self.base}/ok.jpg")
+        image = Image.open(io.BytesIO(raw))
+        self.assertEqual((image.format, image.size), ("JPEG", resume_photo.THUMB_SIZE))
+        self.assertIsNone(resume_photo.fetch_thumbnail(f"{self.base}/page.html"))
+        self.assertIsNone(resume_photo.fetch_thumbnail(""))
+
+    def test_several_thumbnails_are_fetched_together_each_once(self):
+        found = resume_photo.fetch_thumbnails([f"{self.base}/ok.jpg", f"{self.base}/ok.jpg", f"{self.base}/gone.jpg", "", None])
+        self.assertEqual(sorted(found), [f"{self.base}/gone.jpg", f"{self.base}/ok.jpg"])
+        self.assertTrue(found[f"{self.base}/ok.jpg"])
+        self.assertIsNone(found[f"{self.base}/gone.jpg"])
+        self.assertEqual(sorted(self.hits), ["/gone.jpg", "/ok.jpg"])
+        self.assertEqual(resume_photo.fetch_thumbnails([]), {})
+
+    def test_a_photo_and_a_thumbnail_of_the_same_address_are_kept_apart(self):
+        photo, thumb = resume_photo.fetch_photo(f"{self.base}/ok.jpg"), resume_photo.fetch_thumbnail(f"{self.base}/ok.jpg")
+        self.assertNotEqual(photo, thumb)
+
     def test_bad_pictures_give_nothing_and_never_raise(self):
         for path in ("/page.html", "/big.png", "/disguised", "/broken.jpg", "/gone.jpg", "/loop"):
             self.assertIsNone(resume_photo.fetch_photo(self.base + path), path)
@@ -1041,6 +1065,7 @@ class ResumePhotoGuardTests(SimpleTestCase):
                         "http://0.0.0.0/a.jpg", "http://2130706433/a.jpg", "file:///etc/passwd", "ftp://example.com/a.jpg",
                         "javascript:alert(1)", "http:///a.jpg", "data:image/png;base64,AAAA"):
                 self.assertIsNone(resume_photo.fetch_photo(url), url)
+                self.assertIsNone(resume_photo.fetch_thumbnail(url), url)
             opened.assert_not_called()
 
     def test_a_name_that_does_not_resolve_is_not_public(self):
@@ -1078,6 +1103,10 @@ class ResumeExportTests(APITestCase):
         self.photo = mock.patch("portfolio.resume_graphics.fetch_photo", side_effect=lambda url: make_jpeg() if url else None)
         self.fetch_photo = self.photo.start()
         self.addCleanup(self.photo.stop)
+        self.thumbs = mock.patch("portfolio.resume_graphics.fetch_thumbnails",
+                                 side_effect=lambda urls: {u: make_jpeg((480, 360), (zlib.crc32(u.encode()) % 200, 90, 160)) for u in urls if u})
+        self.fetch_thumbnails = self.thumbs.start()
+        self.addCleanup(self.thumbs.stop)
         self.client = APIClient(HTTP_HOST="localhost")
         self.client.force_authenticate(user=self.user)
         about = self.fs.about
@@ -1091,7 +1120,8 @@ class ResumeExportTests(APITestCase):
                                             start_year=date(2020, 1, 6), end_year=date(2024, 10, 5))
         for skill, rating in (("Rust", 87), ("Python", 78), ("C++", 52), ("C", 20)):
             Proficiency.objects.create(about=about, skill_name=skill, skill_range=rating)
-        Portfolio.objects.create(track=self.fs, category="WebDev", name="Shop", thumbnail="https://a.com/t.png", project_link="https://shop.example.com")
+        self.shop = Portfolio.objects.create(track=self.fs, category="WebDev", name="Shop", thumbnail="https://a.com/t.png",
+                                             project_link="https://shop.example.com", description="A small online shop with a cart and card payments.")
         Proficiency.objects.create(about=self.cad.about, skill_name="Solid Works", skill_range=70)
         Resume.objects.create(about=self.cad.about, post="Draftsman", company_name="Drawing Co",
                               start_year=date(2023, 1, 2), end_year=date(2023, 6, 30), description="Drew parts.")
@@ -1362,9 +1392,10 @@ class ResumeExportTests(APITestCase):
                 res = self.get("full-stack", "download/pdf", key)
                 self.assertEqual(res.status_code, 200, res.content[:200])
                 with pymupdf.open(stream=res.content, filetype="pdf") as doc:
-                    self.assertEqual(len(doc[0].get_images()), 1, f"{key}: the photo is on page one")
+                    self.assertEqual(len(doc[0].get_images()), 2, f"{key}: the photo and the project's thumbnail are on page one")
                     text = doc[0].get_text()
-                    for needle in ("Sulaimon Lawal", "fs@example.com", "Rust", "Pio Tech", "Ahmadu Bello University"):
+                    for needle in ("Sulaimon Lawal", "fs@example.com", "Rust", "Pio Tech", "Ahmadu Bello University", "Shop",
+                                   "A small online shop with a cart and card payments.", "shop.example.com"):
                         self.assertIn(needle, text, f"{key}: {needle}")
                     self.assertTrue(any(l["kind"] == pymupdf.LINK_URI for l in doc[0].get_links()), f"{key}: links clickable")
 
@@ -1372,7 +1403,8 @@ class ResumeExportTests(APITestCase):
         spots = {}
         for key in GRAPHIC_DESIGNS:
             with pymupdf.open(stream=self.get("full-stack", "download/pdf", key).content, filetype="pdf") as doc:
-                box = doc[0].get_image_rects(doc[0].get_images()[0][0])[0]
+                boxes = [doc[0].get_image_rects(img[0])[0] for img in doc[0].get_images()]
+                box = next(b for b in boxes if abs(b.width / b.height - 4 / 3) > 0.05)   # the photo, not a 4:3 thumbnail
                 spots[key] = (round(box.x0 / doc[0].rect.width, 1), round(box.y0 / doc[0].rect.height, 1), round(box.width))
         self.assertEqual(len(set(spots.values())), 5, spots)
 
@@ -1389,7 +1421,7 @@ class ResumeExportTests(APITestCase):
                 res = self.get("full-stack", "download/pdf", key)
                 self.assertEqual(res.status_code, 200)
                 with pymupdf.open(stream=res.content, filetype="pdf") as doc:
-                    self.assertEqual(doc[0].get_images(), [])
+                    self.assertEqual(len(doc[0].get_images()), 1, f"{key}: only the project thumbnail is left")
                     self.assertIn("SL", doc[0].get_text().split(), key)
 
     def test_unknown_design_is_rejected_everywhere(self):
@@ -1434,6 +1466,119 @@ class ResumeExportTests(APITestCase):
             self.client.patch(f"{API}/tracks/{self.fs.id}", {"display_pic": "https://img.example.com/other.png"}, format="json")
             self.get("full-stack", "download/pdf", "elegant")
             self.assertEqual(render.call_count, 3, "a new photo address is new content")
+
+    # --- project cards: thumbnail, short description, link -----------------------------------
+
+    def card_pdf(self, key="modern"):
+        res = self.get("full-stack", "download/pdf", key)
+        self.assertEqual(res.status_code, 200, res.content[:200])
+        return res.content
+
+    def test_graphic_designs_show_each_project_with_thumbnail_description_and_link(self):
+        Portfolio.objects.create(track=self.fs, category="Robotics", name="Fence Lamp", thumbnail="https://a.com/lamp.png",
+                                 project_link="https://lamp.example.com", description="Lights a fence line at dusk.")
+        for key in GRAPHIC_DESIGNS:
+            with self.subTest(key):
+                with pymupdf.open(stream=self.card_pdf(key), filetype="pdf") as doc:
+                    text = "".join(page.get_text() for page in doc)
+                    images = sum(len(page.get_images()) for page in doc)
+                    uris = {l["uri"] for page in doc for l in page.get_links() if l["kind"] == pymupdf.LINK_URI}
+                    self.assertEqual(images, 3, f"{key}: the photo and two thumbnails")
+                    for needle in ("Shop", "A small online shop with a cart and card payments.", "Fence Lamp", "Lights a fence line at dusk."):
+                        self.assertIn(needle, text, f"{key}: {needle}")
+                    self.assertIn("https://shop.example.com", uris, f"{key}: the link is clickable")
+                    self.assertIn("https://lamp.example.com", uris, key)
+
+    def test_the_description_is_optional_on_the_card(self):
+        self.shop.description = ""
+        self.shop.save()
+        for key in GRAPHIC_DESIGNS:
+            with self.subTest(key):
+                with pymupdf.open(stream=self.card_pdf(key), filetype="pdf") as doc:
+                    text = doc[0].get_text()
+                    self.assertIn("Shop", text)
+                    self.assertIn("shop.example.com", text)
+                    self.assertNotIn("None", text)
+                    self.assertEqual(len(doc[0].get_images()), 2)
+
+    def test_a_project_whose_thumbnail_cannot_be_fetched_gets_a_plain_tile(self):
+        self.fetch_thumbnails.side_effect = lambda urls: {u: None for u in urls}
+        for key in GRAPHIC_DESIGNS:
+            with self.subTest(key):
+                with pymupdf.open(stream=self.card_pdf(key), filetype="pdf") as doc:
+                    text = doc[0].get_text()
+                    self.assertEqual(len(doc[0].get_images()), 1, f"{key}: just the photo")
+                    self.assertIn("A small online shop", text)
+                    self.assertIn("S", text.split(), f"{key}: the tile carries the project's first letter")
+
+    def test_a_long_project_list_flows_onto_more_pages_without_cutting_cards(self):
+        for i in range(14):
+            Portfolio.objects.create(track=self.fs, category="WebDev", name=f"Project {i}", thumbnail=f"https://a.com/{i}.png",
+                                     project_link=f"https://p{i}.example.com", description="Does a thing. " * 10)
+        for key in GRAPHIC_DESIGNS:
+            with self.subTest(key):
+                with pymupdf.open(stream=self.card_pdf(key), filetype="pdf") as doc:
+                    text = "".join(page.get_text() for page in doc)
+                    self.assertGreaterEqual(len(doc), 2)
+                    for i in range(14):
+                        self.assertIn(f"Project {i}", text, f"{key}: project {i} is not lost")
+                        self.assertIn(f"p{i}.example.com", text, key)
+
+    def test_ats_designs_show_the_description_and_link_but_no_thumbnail(self):
+        for key in ATS_DESIGNS:
+            with self.subTest(key):
+                with pymupdf.open(stream=self.get("full-stack", "download/pdf", key).content, filetype="pdf") as doc:
+                    text = "".join(page.get_text() for page in doc)
+                    self.assertIn("Shop (WebDev): https://shop.example.com", text, key)
+                    self.assertIn("A small online shop with a cart and card payments.", text, key)
+                    self.assertTrue(all(page.get_images() == [] for page in doc), f"{key}: no thumbnail")
+                word = docx.Document(io.BytesIO(self.get("full-stack", "download/docx", key).content))
+                joined = "\n".join(p.text for p in word.paragraphs)
+                self.assertIn("A small online shop with a cart and card payments.", joined, key)
+                self.assertEqual(len(word.inline_shapes), 0, key)
+        self.fetch_thumbnails.assert_not_called()
+
+    def test_ats_designs_still_read_fine_without_a_description(self):
+        self.shop.description = ""
+        self.shop.save()
+        text = pdf_text(self.pdf().content)
+        self.assertIn("Shop (WebDev): https://shop.example.com", text)
+        self.assertNotIn("None", text)
+
+    def test_changing_a_description_changes_the_resume(self):
+        before = self.card_pdf("elegant")
+        self.client.patch(f"{API}/portfolio/{self.shop.id}", {"description": "Now with gift cards."}, format="json")
+        self.assertIn("Now with gift cards.", pdf_text(self.card_pdf("elegant")))
+        self.assertNotEqual(before, self.card_pdf("elegant"))
+        self.assertIn("Now with gift cards.", pdf_text(self.pdf().content))
+
+    def test_project_description_is_optional_short_and_copied(self):
+        body = {"track": self.fs.id, "category": "WebDev", "name": "Blog", "thumbnail": "https://a.com/b.png", "project_link": "https://blog.example.com"}
+        res = self.client.post(f"{API}/portfolio/", body, format="json")
+        self.assertEqual((res.status_code, res.json()["description"]), (201, ""), "left out is fine")
+        res = self.client.post(f"{API}/portfolio/", {**body, "name": "Blog 2", "description": ""}, format="json")
+        self.assertEqual(res.status_code, 201)
+        res = self.client.post(f"{API}/portfolio/", {**body, "name": "Blog 3", "description": "x" * 160}, format="json")
+        self.assertEqual(res.status_code, 201, "160 characters is the limit")
+        res = self.client.post(f"{API}/portfolio/", {**body, "name": "Blog 4", "description": "x" * 161}, format="json")
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("description", res.json())
+        self.assertEqual(self.client.patch(f"{API}/portfolio/{self.shop.id}", {"description": ""}, format="json").status_code, 200)
+        self.shop.refresh_from_db()
+        self.assertEqual(self.shop.description, "")
+        # in the public payload
+        self.client.patch(f"{API}/portfolio/{self.shop.id}", {"description": "Kept."}, format="json")
+        tracks = APIClient(HTTP_HOST="localhost").get(f"{API}/tracks/?username=owner").json()
+        items = next(t for t in tracks if t["slug"] == "full-stack")["items"]
+        self.assertEqual({i["name"]: i["description"] for i in items}["Shop"], "Kept.")
+        # duplicating a portfolio carries it over, and the copy then stands alone
+        res = self.client.post(f"{API}/tracks/", {"username": "owner", "name": "Copy", "copy_from": self.fs.id, "copy_portfolio_items": True}, format="json")
+        self.assertEqual(res.status_code, 201, res.content)
+        copy = PortfolioTrack.objects.get(pk=res.json()["id"])
+        self.assertEqual(copy.items.get(name="Shop").description, "Kept.")
+        self.client.patch(f"{API}/portfolio/{copy.items.get(name='Shop').id}", {"description": "Changed in the copy."}, format="json")
+        self.shop.refresh_from_db()
+        self.assertEqual(self.shop.description, "Kept.")
 
     # --- picking a design in the viewer -----------------------------------------------------
 

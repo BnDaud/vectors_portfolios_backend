@@ -71,6 +71,9 @@ def current_year():
 # Cap for the optional short description on resume/education/skill entries,
 # kept small so the resume board on the portfolio page can't be overrun.
 ENTRY_DESCRIPTION_MAX = 240
+# A project's optional one-liner, shown on the drawn resume designs next to its
+# thumbnail; short so a card stays a few lines tall.
+PROJECT_DESCRIPTION_MAX = 160
 
 
 class About(models.Model):
@@ -207,6 +210,7 @@ class Portfolio(models.Model):
     name = models.CharField(blank=False , max_length=50 , default="")
     thumbnail = models.URLField(blank=False , default= "")
     project_link = models.URLField(blank=False , default="")
+    description = models.CharField(max_length=PROJECT_DESCRIPTION_MAX , blank=True , default="")
 
 
 

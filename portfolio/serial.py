@@ -128,7 +128,7 @@ class PortfolioSerial(ModelSerializer):
 
     class Meta:
         model = Portfolio
-        fields = ["id", "category" , "display_username" , "track" , "name" , "thumbnail" , "project_link"]
+        fields = ["id", "category" , "display_username" , "track" , "name" , "thumbnail" , "project_link" , "description"]
 
 
 class PortfolioTrackSerial(ModelSerializer):
@@ -200,7 +200,8 @@ class PortfolioTrackSerial(ModelSerializer):
             if copy_items:
                 for item in source.items.all():
                     Portfolio.objects.create(track = track , category = item.category , name = item.name ,
-                                              thumbnail = item.thumbnail , project_link = item.project_link)
+                                              thumbnail = item.thumbnail , project_link = item.project_link ,
+                                              description = item.description)
         else:
             About.objects.create(track = track , skill = "" , description = "" , image_link = "")
 

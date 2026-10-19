@@ -12,6 +12,7 @@ They are for sending to a person, not to an online form: the text is real text,
 but the layout is not built for a parser (see the plain designs for that).
 """
 import io
+from concurrent.futures import ThreadPoolExecutor
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
@@ -24,7 +25,7 @@ from reportlab.platypus import (
     NextPageTemplate, PageTemplate, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
 )
 
-from .resume_photo import fetch_photo
+from .resume_photo import fetch_photo, fetch_thumbnails
 from .resume_text import level_for, link, p, pdf_safe, short_url
 
 PAGE_W, PAGE_H = A4
@@ -309,6 +310,66 @@ class _Gauge(Flowable):
         c.circle(reach, y, 1.1 * mm, stroke=0, fill=1)
 
 
+class _ProjectCard(Flowable):
+    """A project: its thumbnail beside the name and category, an optional short
+    description and the link. It takes whatever width it is given, so it reads the
+    same in a narrow column or across a full page. With no usable thumbnail it
+    shows a plain tile carrying the project's first letter."""
+    THUMB_W, THUMB_H, GAP, AFTER = 30 * mm, 22.5 * mm, 4 * mm, 3.4 * mm
+
+    def __init__(self, project, picture, styles, accent, link_color, tile):
+        super().__init__()
+        self.project, self.styles, self.accent, self.link_color, self.tile = project, styles, accent, link_color, tile
+        self.reader = ImageReader(io.BytesIO(picture)) if picture else None
+
+    def wrap(self, available_width, available_height):
+        project, st = self.project, self.styles
+        inner = available_width - self.THUMB_W - self.GAP
+        self._parts = [Paragraph(f"<b>{p(project['name'])}</b>  <font size='7.2' color='{self.link_color}'>{p(project['category']).upper()}</font>",
+                                 ParagraphStyle("pc_name", parent=st["base"], fontSize=10, leading=13))]
+        if project["description"]:
+            self._parts.append(Paragraph(p(project["description"]), ParagraphStyle("pc_text", parent=st["meta"], leading=11.4, spaceBefore=1)))
+        self._parts.append(Paragraph(link(project["link"], short_url(project["link"], 46), self.link_color), ParagraphStyle("pc_link", parent=st["small"], spaceBefore=1.5)))
+        self._sizes = [part.wrap(inner, available_height)[1] for part in self._parts]
+        self.width = available_width
+        self.height = max(self.THUMB_H, sum(self._sizes)) + self.AFTER
+        return self.width, self.height
+
+    def draw(self):
+        c = self.canv
+        top = self.height
+        y = top - self.THUMB_H
+        c.saveState()
+        path = c.beginPath()
+        path.roundRect(0, y, self.THUMB_W, self.THUMB_H, 1.6 * mm)
+        if self.reader:
+            c.clipPath(path, stroke=0, fill=0)
+            c.drawImage(self.reader, 0, y, self.THUMB_W, self.THUMB_H, mask=None)
+        else:
+            c.setFillColor(_hex(self.tile))
+            c.drawPath(path, stroke=0, fill=1)
+            c.setFillColor(_hex(self.accent))
+            c.setFont("Helvetica-Bold", 20)
+            c.drawCentredString(self.THUMB_W / 2, y + self.THUMB_H / 2 - 7, (self.project["name"][:1] or "?").upper())
+        c.restoreState()
+        c.saveState()
+        c.setStrokeColor(_hex(self.tile))
+        c.setLineWidth(0.6)
+        c.roundRect(0, y, self.THUMB_W, self.THUMB_H, 1.6 * mm, stroke=1, fill=0)
+        c.restoreState()
+        c.linkURL(self.project["link"], (0, y, self.THUMB_W, top), relative=1)   # the picture opens the project too
+        x = self.THUMB_W + self.GAP
+        for part, h in zip(self._parts, self._sizes):
+            top -= h
+            part.drawOn(c, x, top)
+
+
+def _project_cards(data, st, accent, link_color, tile):
+    """One card per project; the thumbnails are fetched together, and cached."""
+    pictures = fetch_thumbnails([project["thumbnail"] for project in data["projects"]])
+    return [_ProjectCard(project, pictures.get(project["thumbnail"]), st, accent, link_color, tile) for project in data["projects"]]
+
+
 # ------------------------------------------------------- shared text blocks ----
 
 def _styles(ink, muted, accent):
@@ -324,13 +385,6 @@ def _styles(ink, muted, accent):
 
 def _bullets(bullets, style):
     return [Paragraph(p(text), style, bulletText="•") for text in bullets]
-
-
-def _project_line(project, style, accent_link="#1a4fa0", limit=46):
-    return Paragraph(
-        f"<b>{p(project['name'])}</b> ({p(project['category'])}) – {link(project['link'], short_url(project['link'], limit), accent_link)}",
-        style, bulletText="•",
-    )
 
 
 def _frame(x, y, w, h):
@@ -461,7 +515,7 @@ def _sidebar(data, theme_key):
             main.append(KeepTogether(block + _bullets(job["bullets"], st["bullet"])))
     if data["projects"]:
         main += [Paragraph("PROJECTS", main_h_style), rule("12%")]
-        main += [_project_line(project, st["bullet"]) for project in data["projects"]]
+        main += _project_cards(data, st, t["accent"], "#1a4fa0", t["side_bg"])
 
     buffer = io.BytesIO()
     doc = BaseDocTemplate(buffer, pagesize=A4, title=f"{data['name']} - Resume", author=data["name"], subject=data["headline"])
@@ -536,7 +590,7 @@ def _timeline(data):
             story.append(_TimelineItem(content, width, accent, line, last=index == len(data["education"]) - 1))
     if data["projects"]:
         story += head("PROJECTS")
-        story += [_project_line(project, st["bullet"], "#4c1d95") for project in data["projects"]]
+        story += _project_cards(data, st, "#6d28d9", "#4c1d95", "#ece8f8")
     if data["certificates"]:
         story += head("CERTIFICATES")
         story += [Paragraph(f"{p(label)}: {link(url, short_url(url), '#4c1d95')}", st["bullet"], bulletText="\u2022") for label, url in data["certificates"]]
@@ -649,7 +703,7 @@ def _elegant(data):
             ] + _bullets(job["bullets"], st["bullet"]) + [Spacer(1, 2.2 * mm)]))
     if data["projects"]:
         story += [section("PROJECTS")]
-        story += [_project_line(project, st["bullet"], gold_text, 34) for project in data["projects"]]
+        story += _project_cards(data, st, gold_text, gold_text, "#f6f2ea")
 
     buffer = io.BytesIO()
     doc = BaseDocTemplate(buffer, pagesize=A4, title=f"{data['name']} - Resume", author=data["name"], subject=data["headline"])
@@ -668,10 +722,26 @@ def _elegant(data):
     return buffer.getvalue()
 
 
+def _warm(data):
+    """Fetch the photo and every thumbnail at once, so the engines find them in the cache
+    instead of waiting for one slow address after another."""
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        photo = pool.submit(fetch_photo, data.get("photo_url"))
+        fetch_thumbnails([project["thumbnail"] for project in data["projects"]])
+        photo.result()
+
+
+def _design(engine):
+    def build(data):
+        _warm(data)
+        return engine(data)
+    return build
+
+
 DESIGNS = {
-    "modern": lambda data: _sidebar(data, "modern"),
-    "midnight": lambda data: _sidebar(data, "midnight"),
-    "banner": lambda data: _sidebar(data, "banner"),
-    "timeline": _timeline,
-    "elegant": _elegant,
+    "modern": _design(lambda data: _sidebar(data, "modern")),
+    "midnight": _design(lambda data: _sidebar(data, "midnight")),
+    "banner": _design(lambda data: _sidebar(data, "banner")),
+    "timeline": _design(_timeline),
+    "elegant": _design(_elegant),
 }
