@@ -52,7 +52,7 @@ class SignupTests(APITestCase):
         self.assertTrue(profile.user.check_password(STRONG))
         self.assertFalse(profile.user.is_staff or profile.user.is_superuser)
         me = self.client.get(f"{API}/auth/me").json()
-        self.assertEqual(me, {"authenticated": True, "username": "ada"})
+        self.assertEqual(me, {"authenticated": True, "username": "ada", "has_password": True, "google": False})
 
     def test_usernames_are_web_address_safe_unique_and_not_reserved(self):
         account("owner")
@@ -359,3 +359,91 @@ class GoogleSignInTests(APITestCase):
     def test_switched_off_without_a_client_id(self):
         res, _ = self.google()
         self.assertEqual(res.status_code, 503)
+
+
+@override_settings(SITE_OWNER_USERNAME="owner", GOOGLE_CLIENT_ID="test-client.apps.googleusercontent.com",
+                   PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])
+class SignInOptionsTests(APITestCase):
+    """A password account can connect Google; a Google account can set a password; then either works."""
+
+    def setUp(self):
+        cache.clear()
+
+    def claims(self, sub="g-111", **extra):
+        return {"iss": "https://accounts.google.com", "sub": sub, "email": "x@gmail.com", "email_verified": True, "given_name": "Gee", **extra}
+
+    def post_google(self, client, path, claims=None, error=None, method="post"):
+        with mock.patch("portfolio.auth_views.id_token.verify_oauth2_token", side_effect=error, return_value=claims or self.claims()):
+            return getattr(client, method)(f"{API}{path}", {"credential": "signed.jwt"}, format="json")
+
+    def signed_in(self, profile):
+        client = APIClient(HTTP_HOST="localhost")
+        client.force_authenticate(user=profile.user)
+        return client
+
+    def test_a_password_account_connects_google_then_signs_in_either_way(self):
+        ada = account("ada")
+        res = self.post_google(self.signed_in(ada), "/auth/google/link")
+        self.assertEqual((res.status_code, res.json()), (200, {"google": True}))
+        ada.refresh_from_db()
+        self.assertEqual(ada.google_sub, "g-111")
+        by_google = self.post_google(APIClient(HTTP_HOST="localhost"), "/auth/google")
+        self.assertEqual((by_google.status_code, by_google.json()["username"], by_google.json()["created"]), (200, "ada", False))
+        self.assertEqual(APIClient(HTTP_HOST="localhost").post(f"{API}/auth/login", {"username": "ada", "password": STRONG}, format="json").status_code, 200)
+        self.assertEqual(User.objects.count(), 1, "no second account was made")
+
+    def test_the_site_owner_can_connect_google_too(self):
+        owner = account("owner")
+        self.assertEqual(self.post_google(self.signed_in(owner), "/auth/google/link").status_code, 200)
+        self.assertEqual(self.post_google(APIClient(HTTP_HOST="localhost"), "/auth/google").json()["username"], "owner")
+
+    def test_a_google_account_already_in_use_cannot_be_connected_again(self):
+        ada, bea = account("ada"), account("bea")
+        self.post_google(self.signed_in(ada), "/auth/google/link")
+        res = self.post_google(self.signed_in(bea), "/auth/google/link")
+        self.assertEqual(res.status_code, 409)
+        bea.refresh_from_db()
+        self.assertIsNone(bea.google_sub)
+        self.assertEqual(Profile.objects.get(user__username="ada").google_sub, "g-111", "Ada keeps it")
+
+    def test_connecting_needs_a_sign_in_and_a_genuine_token(self):
+        self.assertIn(self.post_google(APIClient(HTTP_HOST="localhost"), "/auth/google/link").status_code, (401, 403))
+        ada = account("ada")
+        self.assertEqual(self.post_google(self.signed_in(ada), "/auth/google/link", error=ValueError("bad")).status_code, 401)
+        self.assertEqual(self.post_google(self.signed_in(ada), "/auth/google/link", claims=self.claims(email_verified=False)).status_code, 403)
+        ada.refresh_from_db()
+        self.assertIsNone(ada.google_sub)
+
+    def test_a_google_account_sets_a_password_then_signs_in_either_way(self):
+        made = self.post_google(APIClient(HTTP_HOST="localhost"), "/auth/google")
+        username = made.json()["username"]
+        user = User.objects.get(username=username)
+        client = APIClient(HTTP_HOST="localhost"); client.force_authenticate(user=user)
+        self.assertEqual(client.get(f"{API}/auth/me").json()["has_password"], False)
+        self.assertEqual(client.post(f"{API}/auth/set-password", {"new_password": "password"}, format="json").status_code, 400, "weak")
+        res = client.post(f"{API}/auth/set-password", {"new_password": STRONG}, format="json")
+        self.assertEqual(res.status_code, 200)
+        self.assertIn("access_token", res.cookies)
+        self.assertEqual(APIClient(HTTP_HOST="localhost").post(f"{API}/auth/login", {"username": username, "password": STRONG}, format="json").status_code, 200)
+        self.assertEqual(self.post_google(APIClient(HTTP_HOST="localhost"), "/auth/google").json()["username"], username)
+
+    def test_set_password_is_only_for_accounts_without_one(self):
+        ada = account("ada")
+        res = self.signed_in(ada).post(f"{API}/auth/set-password", {"new_password": "Another-Strong-77"}, format="json")
+        self.assertEqual(res.status_code, 400, "an existing password is changed with the current one, not overwritten")
+        ada.user.refresh_from_db()
+        self.assertTrue(ada.user.check_password(STRONG))
+        self.assertIn(APIClient(HTTP_HOST="localhost").post(f"{API}/auth/set-password", {"new_password": STRONG}, format="json").status_code, (401, 403))
+
+    def test_disconnecting_google_never_locks_an_account_out(self):
+        made = self.post_google(APIClient(HTTP_HOST="localhost"), "/auth/google")
+        user = User.objects.get(username=made.json()["username"])
+        client = APIClient(HTTP_HOST="localhost"); client.force_authenticate(user=user)
+        self.assertEqual(client.delete(f"{API}/auth/google/link").status_code, 400, "no password yet: keep Google")
+        self.assertIsNotNone(Profile.objects.get(user=user).google_sub)
+        client.post(f"{API}/auth/set-password", {"new_password": STRONG}, format="json")
+        user.refresh_from_db(); client.force_authenticate(user=user)
+        self.assertEqual((client.delete(f"{API}/auth/google/link").json()), {"google": False})
+        self.assertIsNone(Profile.objects.get(user=user).google_sub)
+        self.assertEqual(self.post_google(APIClient(HTTP_HOST="localhost"), "/auth/google").json()["created"], True,
+                         "after disconnecting, that Google account no longer opens this one")

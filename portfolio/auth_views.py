@@ -112,6 +112,84 @@ def _free_username(given, family):
             return candidate
 
 
+def _google_claims(request):
+    """(claims, None) for a genuine Google ID token in request.data["credential"], else (None, error response)."""
+    if not settings.GOOGLE_CLIENT_ID:
+        return None, Response({"detail": "Google sign-in is not set up."}, status=503)
+    credential = request.data.get("credential")
+    if not isinstance(credential, str) or not credential:
+        return None, Response({"credential": ["This field is required."]}, status=400)
+    try:
+        claims = id_token.verify_oauth2_token(credential, google_requests.Request(), settings.GOOGLE_CLIENT_ID)
+    except ValueError:
+        return None, Response({"detail": "Google sign-in failed. Please try again."}, status=401)
+    if claims.get("iss") not in ("accounts.google.com", "https://accounts.google.com") or not claims.get("sub"):
+        return None, Response({"detail": "Google sign-in failed. Please try again."}, status=401)
+    if not claims.get("email_verified"):
+        return None, Response({"detail": "Your Google email address is not verified."}, status=403)
+    return claims, None
+
+
+class GoogleLinkView(APIView):
+    """
+    The signed-in account's Google connection.
+      POST {credential}: connect this Google account, so it can sign in with Google too.
+      DELETE: disconnect it - only while the account has a password, so it can never be locked out.
+    """
+    name = "auth_google_link"
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "signup"
+
+    def post(self, request):
+        claims, problem = _google_claims(request)
+        if problem:
+            return problem
+        profile = Profile.objects.filter(user=request.user).first()
+        if profile is None:
+            return Response({"detail": "This account has no profile."}, status=400)
+        taken = Profile.objects.filter(google_sub=claims["sub"]).exclude(pk=profile.pk).exists()
+        if taken:
+            return Response({"detail": "That Google account is already connected to another account."}, status=409)
+        profile.google_sub = claims["sub"]
+        profile.save(update_fields=["google_sub"])
+        return Response({"google": True})
+
+    def delete(self, request):
+        profile = Profile.objects.filter(user=request.user).first()
+        if profile is None or not profile.google_sub:
+            return Response({"google": False})
+        if not request.user.has_usable_password():
+            return Response({"detail": "Set a password first, or you would have no way to sign in."}, status=400)
+        profile.google_sub = None
+        profile.save(update_fields=["google_sub"])
+        return Response({"google": False})
+
+
+class SetPasswordView(APIView):
+    """A first password for an account made with Google (one that has none). Changing an existing
+    password stays with auth/change-password, which asks for the current one."""
+    name = "auth_set_password"
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "password_change"
+
+    def post(self, request):
+        user = request.user
+        if user.has_usable_password():
+            return Response({"detail": "This account already has a password - change it instead."}, status=400)
+        new = str(request.data.get("new_password") or "")
+        if not new:
+            return Response({"new_password": ["This field is required."]}, status=400)
+        try:
+            validate_password(new, user)
+        except DjangoValidationError as exc:
+            return Response({"new_password": list(exc.messages)}, status=400)
+        user.set_password(new)
+        user.save(update_fields=["password"])
+        return _signed_in(Response({"password": True}), user)    # the old tokens stop working once a password exists
+
+
 class GoogleLoginView(APIView):
     """
     "Continue with Google": the browser gets a signed ID token from Google and sends it
@@ -126,19 +204,9 @@ class GoogleLoginView(APIView):
     throttle_scope = "signup"
 
     def post(self, request):
-        if not settings.GOOGLE_CLIENT_ID:
-            return Response({"detail": "Google sign-in is not set up."}, status=503)
-        credential = request.data.get("credential")
-        if not isinstance(credential, str) or not credential:
-            return Response({"credential": ["This field is required."]}, status=400)
-        try:
-            claims = id_token.verify_oauth2_token(credential, google_requests.Request(), settings.GOOGLE_CLIENT_ID)
-        except ValueError:
-            return Response({"detail": "Google sign-in failed. Please try again."}, status=401)
-        if claims.get("iss") not in ("accounts.google.com", "https://accounts.google.com") or not claims.get("sub"):
-            return Response({"detail": "Google sign-in failed. Please try again."}, status=401)
-        if not claims.get("email_verified"):
-            return Response({"detail": "Your Google email address is not verified."}, status=403)
+        claims, problem = _google_claims(request)
+        if problem:
+            return problem
 
         profile = Profile.objects.select_related("user").filter(google_sub=claims["sub"]).first()
         created = profile is None
@@ -253,5 +321,12 @@ class MeView(APIView):
 
     def get(self, request):
         if request.user and request.user.is_authenticated:
-            return Response({"authenticated": True, "username": request.user.username})
+            profile = Profile.objects.filter(user=request.user).first()
+            return Response({
+                "authenticated": True,
+                "username": request.user.username,
+                # which ways this account can sign in
+                "has_password": request.user.has_usable_password(),
+                "google": bool(profile and profile.google_sub),
+            })
         return Response({"authenticated": False})
