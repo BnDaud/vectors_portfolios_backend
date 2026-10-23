@@ -4,6 +4,7 @@ from .views import List_portfolio ,list_about ,UpdateAbout , updateportfolio , l
 from .views import list_tracks , update_track , list_goals , update_goal , complete_goal
 from .auth_views import CsrfPrimeView , SignupView , GoogleLoginView , GoogleLinkView , SetPasswordView , LoginView , LogoutView , RefreshView , MeView , ChangePasswordView
 from .analytics_views import RecordVisitView , RecordResumeViewView , VisitorSummaryView
+from .accounts_views import AccountListView , AccountDeleteView
 from .resume_views import ResumeDownloadView , ResumePagesView , ResumePageImageView , ResumeTemplatesView
 
 app_name = "portfolio"
@@ -101,6 +102,8 @@ urlpatterns = [
     #auth/change-password takes current_password + new_password for the signed-in user
 
     path("auth/csrf" , view=CsrfPrimeView.as_view() , name=CsrfPrimeView.name),
+    path("accounts/" , view=AccountListView.as_view() , name=AccountListView.name),
+    path("accounts/<int:pk>" , view=AccountDeleteView.as_view() , name=AccountDeleteView.name),
     path("auth/signup" , view=SignupView.as_view() , name=SignupView.name),
     path("auth/google" , view=GoogleLoginView.as_view() , name=GoogleLoginView.name),
     path("auth/google/link" , view=GoogleLinkView.as_view() , name=GoogleLinkView.name),

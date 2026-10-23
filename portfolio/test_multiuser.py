@@ -447,3 +447,55 @@ class SignInOptionsTests(APITestCase):
         self.assertIsNone(Profile.objects.get(user=user).google_sub)
         self.assertEqual(self.post_google(APIClient(HTTP_HOST="localhost"), "/auth/google").json()["created"], True,
                          "after disconnecting, that Google account no longer opens this one")
+
+
+@override_settings(SITE_OWNER_USERNAME="owner", PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])
+class AccountsPanelTests(APITestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.owner, cls.ada = account("owner"), account("ada", limit=1)
+        cls.ada.user.email, cls.ada.email, cls.ada.phone_number = "ada@secret.example", "ada@contact.example", "+2340000"
+        cls.ada.user.save(); cls.ada.save()
+        cls.track = portfolio(cls.ada, "Data", "data")
+
+    def as_(self, profile):
+        client = APIClient(HTTP_HOST="localhost"); client.force_authenticate(user=profile.user); return client
+
+    def test_the_site_owner_sees_how_many_accounts_and_no_personal_details(self):
+        body = self.as_(self.owner).get(f"{API}/accounts/").json()
+        self.assertEqual(body["count"], 2)
+        ada = next(a for a in body["accounts"] if a["username"] == "ada")
+        self.assertEqual((ada["portfolios"], ada["password"], ada["google"], ada["is_you"]), (1, True, False, False))
+        raw = str(body)
+        for secret in ("secret.example", "contact.example", "+2340000", "Ada", "pbkdf2", "md5"):
+            self.assertNotIn(secret, raw, secret)
+
+    def test_nobody_else_sees_or_deletes_accounts(self):
+        self.assertEqual(self.as_(self.ada).get(f"{API}/accounts/").status_code, 403)
+        self.assertIn(APIClient(HTTP_HOST="localhost").get(f"{API}/accounts/").status_code, (401, 403))
+        self.assertEqual(self.as_(self.ada).delete(f"{API}/accounts/{self.owner.user.pk}").status_code, 403)
+        self.assertEqual(User.objects.count(), 2)
+
+    def test_the_site_owner_deletes_an_account_and_everything_of_its_with_it(self):
+        shared = Portfolio.objects.create(category="WebDev", name="Shared", thumbnail="https://a.com/t.png", project_link="https://s.example.com")
+        mine = portfolio(self.owner, "Mine", "mine")
+        shared.tracks.add(self.track)
+        self.assertEqual(self.as_(self.owner).delete(f"{API}/accounts/{self.ada.user.pk}").status_code, 204)
+        self.assertFalse(User.objects.filter(username="ada").exists())
+        self.assertFalse(PortfolioTrack.objects.filter(pk=self.track.pk).exists())
+        self.assertFalse(Portfolio.objects.filter(pk=shared.pk).exists(), "a project only Ada showed goes too")
+        self.assertTrue(PortfolioTrack.objects.filter(pk=mine.pk).exists())
+        self.assertEqual(self.as_(self.owner).delete(f"{API}/accounts/{self.ada.user.pk}").status_code, 404)
+
+    def test_the_site_owner_cannot_delete_their_own_account_here(self):
+        self.assertEqual(self.as_(self.owner).delete(f"{API}/accounts/{self.owner.user.pk}").status_code, 403)
+        self.assertTrue(User.objects.filter(username="owner").exists())
+
+
+    def test_admin_accounts_are_protected_too(self):
+        admin = User.objects.create_superuser("root-admin", password=STRONG)
+        body = self.as_(self.owner).get(f"{API}/accounts/").json()
+        self.assertTrue(next(a for a in body["accounts"] if a["username"] == "root-admin")["protected"])
+        self.assertFalse(next(a for a in body["accounts"] if a["username"] == "ada")["protected"])
+        self.assertEqual(self.as_(self.owner).delete(f"{API}/accounts/{admin.pk}").status_code, 403)
+        self.assertTrue(User.objects.filter(pk=admin.pk).exists())
