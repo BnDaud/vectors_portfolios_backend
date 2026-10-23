@@ -24,6 +24,17 @@ from .models import (
 
 API = "/api_root"
 
+# these tests' account is called "owner"; it plays the site owner (portfolios at the root, no limit)
+_site_owner = override_settings(SITE_OWNER_USERNAME="owner")
+
+
+def setUpModule():
+    _site_owner.enable()
+
+
+def tearDownModule():
+    _site_owner.disable()
+
 
 def make_project(track, **fields):
     """A project shown in `track` (more portfolios can be added with .tracks.add)."""

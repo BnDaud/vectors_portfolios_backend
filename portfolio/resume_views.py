@@ -7,6 +7,7 @@ from rest_framework.views import APIView
 
 from . import resume_builder
 from .models import PortfolioTrack
+from .permissions import require_owner
 
 CONTENT_TYPES = {
     "pdf": "application/pdf",
@@ -14,11 +15,13 @@ CONTENT_TYPES = {
 }
 
 
-def _track_or_404(slug):
+def _track_or_404(slug, request):
+    """`slug` in the account named by ?u= (or, without it, the site owner's portfolios at the root)."""
+    username = request.query_params.get("u") or settings.SITE_OWNER_USERNAME
     track = (
         PortfolioTrack.objects.select_related("profile__user")
         .prefetch_related("items")
-        .filter(slug=slug)
+        .filter(slug=slug, profile__user__username=username)
         .first()
     )
     if track is None:
@@ -60,7 +63,8 @@ class ResumeDownloadView(APIView):
             return error
         if kind not in resume_builder.TEMPLATES[template]["formats"]:
             return Response({"template": [f"The {resume_builder.TEMPLATES[template]['label']} design is only available as: {', '.join(resume_builder.TEMPLATES[template]['formats'])}."]}, status=400)
-        track = _track_or_404(slug)
+        track = _track_or_404(slug, request)
+        require_owner(request, track.profile.user)     # your own resume only
         data = resume_builder.collect(track, settings.SITE_URL)
         response = HttpResponse(resume_builder.cached(kind, track, data, template), content_type=CONTENT_TYPES[kind])
         # the name comes from the owner's name and the portfolio's name, reduced to safe characters
@@ -81,7 +85,7 @@ class ResumePagesView(APIView):
         template, error = _template(request, resume_builder.VIEWER_TEMPLATE)
         if error:
             return error
-        track = _track_or_404(slug)
+        track = _track_or_404(slug, request)
         data = resume_builder.collect(track, settings.SITE_URL)
         pages = resume_builder.cached("pages", track, data, template)
         response = Response({"name": data["name"], "portfolio": data["portfolio"], "pages": len(pages), "version": resume_builder.digest(data), "template": template})
@@ -102,7 +106,7 @@ class ResumePageImageView(APIView):
         template, error = _template(request, resume_builder.VIEWER_TEMPLATE)
         if error:
             return error
-        track = _track_or_404(slug)
+        track = _track_or_404(slug, request)
         data = resume_builder.collect(track, settings.SITE_URL)
         if request.query_params.get("thumb"):
             if page != 1:

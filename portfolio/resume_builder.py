@@ -14,6 +14,7 @@ import unicodedata
 from datetime import date
 
 import pymupdf
+from django.conf import settings
 from django.core.cache import cache
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -89,6 +90,12 @@ def _file_part(text):
     return re.sub(r"[^A-Za-z0-9]+", "_", text).strip("_") or "Resume"
 
 
+def portfolio_path(track):
+    """The site owner's portfolios are at the root (/full-stack); everyone else's under /u/<username>/."""
+    username = track.profile.user.username
+    return f"/{track.slug}" if username == settings.SITE_OWNER_USERNAME else f"/u/{username}/{track.slug}"
+
+
 def collect(track, site_url):
     """Everything the resume says, from one portfolio, as plain data."""
     today = date.today()
@@ -103,7 +110,7 @@ def collect(track, site_url):
         headline = f"{headline} | {years}+ years of experience"
 
     contact = [part for part in (track.email, track.phone_number, track.location) if part]
-    links = [("Portfolio", f"{site_url.rstrip('/')}/{track.slug}")]
+    links = [("Portfolio", f"{site_url.rstrip('/')}{portfolio_path(track)}")]
     for label, url in (("LinkedIn", track.linkedin), ("GitHub", track.github)):
         if url:
             links.append((label, url))

@@ -238,6 +238,10 @@ class PortfolioTrackSerial(ModelSerializer):
         if source is not None:
             initial["location"] = source.location
 
+        if profile.max_portfolios is not None and profile.tracks.count() >= profile.max_portfolios:
+            raise serializers.ValidationError({"detail": f"Your account can have {profile.max_portfolios} portfolio"
+                                               f"{'' if profile.max_portfolios == 1 else 's'}. Delete one to make another."})
+
         validated_data.setdefault("slug" , _unique_slug(profile , validated_data["name"]))
         track = PortfolioTrack.objects.create(profile = profile , **{**initial , **validated_data})
 
@@ -314,7 +318,8 @@ class Profileserial(ModelSerializer):
 
     class Meta:
         model = Profile
-        fields = ["id" , "user" , "display_pic" ,"github" , "linkedin" , "whatapp" ,"facebook" ,"email","twitter","phone_number","tracks" ]
+        fields = ["id" , "user" , "display_pic" ,"github" , "linkedin" , "whatapp" ,"facebook" ,"email","twitter","phone_number","tracks" , "max_portfolios"]
+        read_only_fields = ["max_portfolios"]
 
     def create(self , validated_data):
         #img = validated_data.pop("display_pic")

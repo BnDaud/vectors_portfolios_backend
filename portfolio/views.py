@@ -7,8 +7,43 @@ from .models import Profile , Portfolio , About ,Resume ,School ,Proficiency , P
 from rest_framework.response import Response
 from . serial import Profileserial ,Userserial , PortfolioSerial ,AboutSerial ,ResumeSerial , SchoolSerial ,ProficiencySerial , PortfolioTrackSerial , GoalSerial , delete_if_in_no_portfolio
 from django.contrib.auth.models import User
+from rest_framework.permissions import BasePermission
+from .permissions import IsOwnerOrReadOnly , SiteOwnerOnlyWrites , is_site_owner , owner_of , require_owner
+
+
+class SiteOwnerOnly(BasePermission):
+    """Creating, listing and editing user accounts by hand: the site owner only (sign-up has its own endpoint)."""
+
+    def has_permission(self , request , view):
+        return is_site_owner(request.user)
 
 # Create your views here.
+
+class ParentOwnedMixin:
+    """
+    For entries hanging off a parent (an About off a portfolio, a job off an About,
+    a project off portfolios): whatever parent a create or an edit points at must
+    be the signed-in user's own - so nothing can be added to, or moved into,
+    someone else's portfolio.
+    """
+    parent_fields = ()
+
+    def _check_parents(self , serializer):
+        for field in self.parent_fields:
+            if field not in serializer.validated_data:
+                continue
+            value = serializer.validated_data[field]
+            for parent in (value if isinstance(value , (list , tuple)) else [value]):
+                require_owner(self.request , owner_of(parent))
+
+    def perform_create(self , serializer):
+        self._check_parents(serializer)
+        serializer.save()
+
+    def perform_update(self , serializer):
+        self._check_parents(serializer)
+        serializer.save()
+
 
 class Userdetail(generics.ListCreateAPIView):
 
@@ -16,6 +51,7 @@ class Userdetail(generics.ListCreateAPIView):
     name = "create_user"
     queryset = User.objects.all()
     serializer_class = Userserial
+    permission_classes = [SiteOwnerOnly]
 
 
 class updateUserdetail(generics.RetrieveUpdateAPIView):
@@ -23,6 +59,7 @@ class updateUserdetail(generics.RetrieveUpdateAPIView):
     name = "update_user"
     queryset = User.objects.all()
     serializer_class = Userserial
+    permission_classes = [SiteOwnerOnly]
 
 
 class ListCreateProfile(generics.ListCreateAPIView):
@@ -30,6 +67,7 @@ class ListCreateProfile(generics.ListCreateAPIView):
     name = "all_profiles"
     #queryset = Profile.objects.all()
     serializer_class = Profileserial
+    permission_classes = [SiteOwnerOnlyWrites]   # new accounts come from auth/signup
 
     def get_queryset(self):
         url_arg = self.request.query_params.get("username" ,None)
@@ -44,12 +82,18 @@ class UpdateProfile(generics.RetrieveUpdateDestroyAPIView):
     name = "update_profiles"
     queryset = Profile.objects.all()
     serializer_class = Profileserial
+    permission_classes = [IsOwnerOrReadOnly]
 
 
 class list_tracks(generics.ListCreateAPIView):
     """ This class lists/creates PortfolioTracks, filterable by ?username= """
     name = "List_tracks"
     serializer_class = PortfolioTrackSerial
+
+    def perform_create(self , serializer):
+        if serializer.validated_data.get("username") != self.request.user.username:
+            require_owner(self.request , None)
+        serializer.save()
 
     def get_queryset(self):
         url_arg = self.request.query_params.get("username" , None)
@@ -65,9 +109,11 @@ class update_track(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = PortfolioTrackSerial
     queryset = PortfolioTrack.objects.all()
     name = "update_track"
+    permission_classes = [IsOwnerOrReadOnly]
 
 
-class list_about (generics.ListCreateAPIView):
+class list_about (ParentOwnedMixin , generics.ListCreateAPIView):
+    parent_fields = ("track",)
 
     """ this class is responsible for creating and listing user details"""
     name = "About_User"
@@ -75,15 +121,18 @@ class list_about (generics.ListCreateAPIView):
     serializer_class = AboutSerial
 
 
-class UpdateAbout(generics.RetrieveUpdateDestroyAPIView):
+class UpdateAbout(ParentOwnedMixin , generics.RetrieveUpdateDestroyAPIView):
+    parent_fields = ("track",)
     """
     This class is to update about any user and can be access with it Id"""
     name = "update_about"
+    permission_classes = [IsOwnerOrReadOnly]
     queryset = About.objects.all()
     serializer_class = AboutSerial
 
 
-class List_portfolio(generics.ListCreateAPIView):
+class List_portfolio(ParentOwnedMixin , generics.ListCreateAPIView):
+    parent_fields = ("tracks",)
     """ This class returns all the available portfolio in the data base"""
     serializer_class = PortfolioSerial
     queryset = Portfolio.objects.all()
@@ -96,11 +145,14 @@ class updateportfolio(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = PortfolioSerial
     queryset = Portfolio.objects.all()
     name  = "update_portfolio"
+    permission_classes = [IsOwnerOrReadOnly]
 
     def update(self , request , *args , **kwargs):
         instance = self.get_object()
         serializer = self.get_serializer(instance , data = request.data , partial = kwargs.pop("partial" , False))
         serializer.is_valid(raise_exception = True)
+        for track in serializer.validated_data.get("tracks" , []):     # can only share into your own portfolios
+            require_owner(request , owner_of(track))
         project = serializer.save()
         if project.pk is None:      # it was unticked in every portfolio, so it was deleted
             return Response(status = 204)
@@ -133,7 +185,8 @@ class updateportfolio(generics.RetrieveUpdateDestroyAPIView):
         return Response(status = 204)
 
 
-class list_resume(generics.ListCreateAPIView):
+class list_resume(ParentOwnedMixin , generics.ListCreateAPIView):
+    parent_fields = ("about",)
 
     """ This Class List all the resume availble
     if username arg is not passed with the url
@@ -152,15 +205,18 @@ class list_resume(generics.ListCreateAPIView):
 
         return Resume.objects.all()
 
-class update_resume(generics.RetrieveUpdateDestroyAPIView):
+class update_resume(ParentOwnedMixin , generics.RetrieveUpdateDestroyAPIView):
+    parent_fields = ("about",)
     """
     this Class is responsible to update a single resume at a given time
      and this could only be called with its Id"""
     serializer_class = ResumeSerial
     queryset = Resume.objects.all()
     name = "update_resume"
+    permission_classes = [IsOwnerOrReadOnly]
 
-class list_school(generics.ListCreateAPIView):
+class list_school(ParentOwnedMixin , generics.ListCreateAPIView):
+    parent_fields = ("about",)
 
     """ This Class List all the school availble
     if username arg is not passed with the url
@@ -179,15 +235,18 @@ class list_school(generics.ListCreateAPIView):
 
         return School.objects.all()
 
-class update_school(generics.RetrieveUpdateDestroyAPIView):
+class update_school(ParentOwnedMixin , generics.RetrieveUpdateDestroyAPIView):
+    parent_fields = ("about",)
     """
     this Class is responsible to update a single school at a given time
      and this could only be called with its Id"""
     serializer_class = SchoolSerial
     queryset = School.objects.all()
     name = "list_school"
+    permission_classes = [IsOwnerOrReadOnly]
 
-class list_proficiency(generics.ListCreateAPIView):
+class list_proficiency(ParentOwnedMixin , generics.ListCreateAPIView):
+    parent_fields = ("about",)
 
     """ This Class List all the proficiency available
     if username arg is not passed with the url
@@ -206,19 +265,26 @@ class list_proficiency(generics.ListCreateAPIView):
 
         return Proficiency.objects.all()
 
-class update_proficiency(generics.RetrieveUpdateDestroyAPIView):
+class update_proficiency(ParentOwnedMixin , generics.RetrieveUpdateDestroyAPIView):
+    parent_fields = ("about",)
     """
     this Class is responsible to update a single school at a given time
      and this could only be called with its Id"""
     serializer_class = ProficiencySerial
     queryset = Proficiency.objects.all()
     name = "update_proficiency"
+    permission_classes = [IsOwnerOrReadOnly]
 
 
 class list_goals(generics.ListCreateAPIView):
     """ Lists/creates Goals, filterable by ?username= """
     name = "List_goals"
     serializer_class = GoalSerial
+
+    def perform_create(self , serializer):
+        if serializer.validated_data.get("username") != self.request.user.username:
+            require_owner(self.request , None)
+        serializer.save()
 
     def get_queryset(self):
         url_arg = self.request.query_params.get("username" , None)
@@ -234,6 +300,7 @@ class update_goal(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = GoalSerial
     queryset = Goal.objects.all()
     name = "update_goal"
+    permission_classes = [IsOwnerOrReadOnly]
 
 
 ENTRY_TYPE_MODELS = {
@@ -251,6 +318,7 @@ class complete_goal(generics.GenericAPIView):
     PATCH body: {entry_type, entry_data: {...}, track_ids: [...]}
     """
     name = "complete_goal"
+    permission_classes = [IsOwnerOrReadOnly]
     queryset = Goal.objects.all()
     serializer_class = GoalSerial
 

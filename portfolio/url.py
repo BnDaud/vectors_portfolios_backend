@@ -2,7 +2,7 @@ from django.urls import path, re_path
 from .views import ListCreateProfile , api_root , list_about , Userdetail ,updateUserdetail , UpdateProfile
 from .views import List_portfolio ,list_about ,UpdateAbout , updateportfolio , list_resume , update_resume , list_school , update_school , list_proficiency , update_proficiency
 from .views import list_tracks , update_track , list_goals , update_goal , complete_goal
-from .auth_views import CsrfPrimeView , LoginView , LogoutView , RefreshView , MeView , ChangePasswordView
+from .auth_views import CsrfPrimeView , SignupView , GoogleLoginView , LoginView , LogoutView , RefreshView , MeView , ChangePasswordView
 from .analytics_views import RecordVisitView , RecordResumeViewView , VisitorSummaryView
 from .resume_views import ResumeDownloadView , ResumePagesView , ResumePageImageView , ResumeTemplatesView
 
@@ -101,6 +101,8 @@ urlpatterns = [
     #auth/change-password takes current_password + new_password for the signed-in user
 
     path("auth/csrf" , view=CsrfPrimeView.as_view() , name=CsrfPrimeView.name),
+    path("auth/signup" , view=SignupView.as_view() , name=SignupView.name),
+    path("auth/google" , view=GoogleLoginView.as_view() , name=GoogleLoginView.name),
     path("auth/login" , view=LoginView.as_view() , name=LoginView.name),
     path("auth/logout" , view=LogoutView.as_view() , name=LogoutView.name),
     path("auth/refresh" , view=RefreshView.as_view() , name=RefreshView.name),

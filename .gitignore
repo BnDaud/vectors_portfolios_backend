@@ -6,3 +6,7 @@ media/
 staticfiles/
 .env
 .DS_Store
+
+# Google OAuth client file (holds a client secret) - never commit
+keys from google.txt
+*client_secret*.json

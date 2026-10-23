@@ -1,6 +1,7 @@
 import re
 from datetime import timedelta
 
+from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 from rest_framework import exceptions
@@ -25,17 +26,38 @@ def is_bot(request):
     return not agent or bool(BOT_PATTERN.search(agent))
 
 
-def is_owner(request):
-    """True when the request carries a valid signed-in session (the site owner)."""
+def signed_in_user(request):
+    """The account behind a valid sign-in cookie, or None."""
     raw = request.COOKIES.get("access_token")
     if not raw:
-        return False
+        return None
     auth = JWTAuthentication()
     try:
-        auth.get_user(auth.get_validated_token(raw))
-        return True
+        return auth.get_user(auth.get_validated_token(raw))
     except (InvalidToken, TokenError, exceptions.AuthenticationFailed):
+        return None
+
+
+def is_owner(request, owner=None):
+    """True when the viewer is signed in as the owner of the page (any signed-in viewer, when no owner is given).
+    Owners looking at their own pages are never counted; one user visiting another's page is a visitor."""
+    user = signed_in_user(request)
+    if user is None:
         return False
+    return owner is None or user.pk == owner.pk
+
+
+def page_from_path(path):
+    """(username, portfolio slug or None) for a site path: '/' and '/<slug>' are the site owner's,
+    '/u/<user>' and '/u/<user>/<slug>' another account's."""
+    parts = [p for p in path.split("/") if p]
+    if parts[:1] == ["u"]:
+        if len(parts) not in (2, 3):
+            return None, None
+        return parts[1], (parts[2] if len(parts) == 3 else None)
+    if len(parts) > 1:
+        return None, None
+    return settings.SITE_OWNER_USERNAME, (parts[0] if parts else None)
 
 
 def _touch_visitor(visitor_uuid, now):

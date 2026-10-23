@@ -101,6 +101,13 @@ COOKIE_SAMESITE = config("COOKIE_SAMESITE", default="Lax")
 CSRF_COOKIE_SECURE = COOKIE_SECURE
 CSRF_COOKIE_SAMESITE = COOKIE_SAMESITE
 
+# The account whose portfolios sit at the site's root (/full-stack); everyone else's
+# live under /u/<username>/. It is also the only account with no portfolio limit.
+SITE_OWNER_USERNAME = config("SITE_OWNER_USERNAME", default="Vector")
+
+# "Continue with Google": the OAuth client id (public, not a secret). Empty switches Google sign-in off.
+GOOGLE_CLIENT_ID = config("GOOGLE_CLIENT_ID", default="392357048235-9atth9opmrr253qgn45q12h7et8q4bh2.apps.googleusercontent.com")
+
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
         "portfolio.authentication.CookieJWTAuthentication",
@@ -111,6 +118,9 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_RATES": {
         # guessing the current password through a stolen session
         "password_change": "5/min",
+        # per IP, for creating accounts and for logging in
+        "signup": "10/hour",
+        "login": "20/min",
         # per IP, for the public visitor beacon
         "visit": "120/hour",
         # per IP, for the read-only resume viewer (a view loads one JSON + one image per page)

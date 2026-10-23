@@ -21,6 +21,11 @@ class Profile(models.Model):
 
 
     display_pic = models.URLField(default="" , blank=False)
+    # How many portfolios this account may have; empty means no limit (the site owner).
+    # Accounts made through sign-up are given one (see auth_views.SignupView).
+    max_portfolios = models.PositiveSmallIntegerField(null=True , blank=True , default=None)
+    # Google's id for an account that signs in with Google (never shown anywhere).
+    google_sub = models.CharField(max_length=255 , unique=True , null=True , blank=True , editable=False)
 
     def __str__(self):
         return self.user.username
