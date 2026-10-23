@@ -8,6 +8,8 @@ from rest_framework.permissions import BasePermission
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from .account_lifecycle import deletes_on, remove_account
+from .models import DeletedAccount
 from .permissions import is_site_owner
 
 
@@ -36,6 +38,7 @@ class AccountListView(APIView):
                 "google": bool(profile and profile.google_sub),
                 "is_you": user.pk == request.user.pk,
                 # the owner's own and the Django admin accounts cannot be deleted from here
+                "deletes_on": deletes_on(user),
                 "protected": user.pk == request.user.pk or user.is_staff or user.is_superuser or is_site_owner(user),
             })
         return Response({"count": len(rows), "accounts": rows})
@@ -51,5 +54,5 @@ class AccountDeleteView(APIView):
             return Response(status=404)
         if user.pk == request.user.pk or is_site_owner(user) or user.is_staff or user.is_superuser:
             raise PermissionDenied("The site owner's and admin accounts cannot be deleted here.")
-        user.delete()          # takes the profile, its portfolios and their projects with it (shared ones only from this account)
+        remove_account(user, DeletedAccount.Reason.REMOVED)   # profile, portfolios and their projects go too; a note says what happened
         return Response(status=204)

@@ -295,6 +295,26 @@ class ResumeView(models.Model):
         ordering = ["-created_at"]
 
 
+class DeletedAccount(models.Model):
+    """
+    What is left of a deleted account, so a returning person is told what happened
+    instead of "not found": only the username (lower-cased), when, and why. Nothing
+    else about them is kept. Signing up again with the username clears it.
+    """
+    class Reason(models.TextChoices):
+        INACTIVE = "inactive", "No visits for a year"
+        REMOVED = "removed", "Removed by the site owner"
+
+    username = models.CharField(max_length=150 , unique=True)
+    # Google's opaque id for a Google account, so "Continue with Google" can explain too
+    google_sub = models.CharField(max_length=255 , null=True , blank=True , db_index=True)
+    reason = models.CharField(max_length=20 , choices=Reason)
+    deleted_at = models.DateTimeField(default=timezone.now)
+
+    def __str__(self):
+        return f"{self.username} ({self.reason}, {self.deleted_at:%Y-%m-%d})"
+
+
 @receiver(post_delete, sender=PortfolioTrack)
 def drop_projects_left_in_no_portfolio(sender , **kwargs):
     """Deleting a portfolio takes its own projects with it - but not the ones other portfolios also show."""

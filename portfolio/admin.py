@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Profile , Portfolio , About , Resume , School , Proficiency , PortfolioTrack , Goal
+from .models import DeletedAccount , Profile , Portfolio , About , Resume , School , Proficiency , PortfolioTrack , Goal
 # Register your models here.
 
 class display_profile(admin.ModelAdmin):
@@ -46,3 +46,6 @@ admin.site.register(Resume , display_resume)
 admin.site.register(School , display_school)
 admin.site.register(Proficiency , display_proficiency)
 admin.site.register(Goal , display_goal)
+
+
+admin.site.register(DeletedAccount)

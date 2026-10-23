@@ -20,7 +20,8 @@ from rest_framework.throttling import ScopedRateThrottle
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
 
-from .models import Profile
+from .account_lifecycle import deletes_on, deletion_note, describe, sweep_daily
+from .models import DeletedAccount, Profile
 
 ACCESS_COOKIE = "access_token"
 # what a new account's page shows until its owner adds a photo
@@ -98,6 +99,7 @@ class SignupView(APIView):
             return Response(errors, status=400)
 
         with transaction.atomic():
+            DeletedAccount.objects.filter(username=username.lower()).delete()    # a fresh start under the old name
             user = User.objects.create_user(username=username, password=password, first_name=first_name, last_name=last_name)
             Profile.objects.create(user=user, display_pic=DEFAULT_DISPLAY_PIC, max_portfolios=1)
         return _signed_in(Response({"username": user.username}, status=201), user)
@@ -208,9 +210,15 @@ class GoogleLoginView(APIView):
         if problem:
             return problem
 
+        sweep_daily()
         profile = Profile.objects.select_related("user").filter(google_sub=claims["sub"]).first()
         created = profile is None
+        if created and not request.data.get("start_fresh"):
+            note = deletion_note(google_sub=claims["sub"])
+            if note is not None:
+                return Response({"detail": describe(note), "deleted": True, "can_start_again": True}, status=410)
         if created:
+            DeletedAccount.objects.filter(google_sub=claims["sub"]).update(google_sub=None)
             given, family = str(claims.get("given_name") or claims.get("name") or "")[:150], str(claims.get("family_name") or "")[:150]
             with transaction.atomic():
                 user = User(username=_free_username(given, family), first_name=given, last_name=family, email=str(claims.get("email") or ""))
@@ -234,9 +242,13 @@ class LoginView(APIView):
     def post(self, request):
         username = request.data.get("username")
         password = request.data.get("password")
+        sweep_daily()
         user = authenticate(request, username=username, password=password)
 
         if user is None:
+            note = deletion_note(username=username) if isinstance(username, str) and not User.objects.filter(username__iexact=username).exists() else None
+            if note is not None:
+                return Response({"detail": describe(note), "deleted": True}, status=410)
             return Response({"detail": "Invalid credentials"}, status=401)
         return _signed_in(Response({"username": user.username}), user)
 
@@ -315,6 +327,21 @@ class ChangePasswordView(APIView):
         return response
 
 
+class AccountStatusView(APIView):
+    """Public: was there an account by this name that has been deleted? So its old address can say
+    so instead of "not found". Only answers for names that were deleted; nothing about live accounts."""
+    name = "auth_account_status"
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        username = request.query_params.get("username") or ""
+        note = deletion_note(username=username) if not User.objects.filter(username__iexact=username).exists() else None
+        if note is None:
+            return Response({"deleted": False})
+        return Response({"deleted": True, "deleted_at": note.deleted_at, "reason": note.reason, "message": describe(note)})
+
+
 class MeView(APIView):
     name = "auth_me"
     permission_classes = [AllowAny]
@@ -328,5 +355,7 @@ class MeView(APIView):
                 # which ways this account can sign in
                 "has_password": request.user.has_usable_password(),
                 "google": bool(profile and profile.google_sub),
+                # when the account is deleted if nobody visits it before then (None: never)
+                "deletes_on": deletes_on(request.user),
             })
         return Response({"authenticated": False})

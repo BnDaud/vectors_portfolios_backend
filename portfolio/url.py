@@ -2,7 +2,7 @@ from django.urls import path, re_path
 from .views import ListCreateProfile , api_root , list_about , Userdetail ,updateUserdetail , UpdateProfile
 from .views import List_portfolio ,list_about ,UpdateAbout , updateportfolio , list_resume , update_resume , list_school , update_school , list_proficiency , update_proficiency
 from .views import list_tracks , update_track , list_goals , update_goal , complete_goal
-from .auth_views import CsrfPrimeView , SignupView , GoogleLoginView , GoogleLinkView , SetPasswordView , LoginView , LogoutView , RefreshView , MeView , ChangePasswordView
+from .auth_views import CsrfPrimeView , SignupView , GoogleLoginView , GoogleLinkView , SetPasswordView , AccountStatusView , LoginView , LogoutView , RefreshView , MeView , ChangePasswordView
 from .analytics_views import RecordVisitView , RecordResumeViewView , VisitorSummaryView
 from .accounts_views import AccountListView , AccountDeleteView
 from .resume_views import ResumeDownloadView , ResumePagesView , ResumePageImageView , ResumeTemplatesView
@@ -111,6 +111,7 @@ urlpatterns = [
     path("auth/login" , view=LoginView.as_view() , name=LoginView.name),
     path("auth/logout" , view=LogoutView.as_view() , name=LogoutView.name),
     path("auth/refresh" , view=RefreshView.as_view() , name=RefreshView.name),
+    path("auth/account-status" , view=AccountStatusView.as_view() , name=AccountStatusView.name),
     path("auth/me" , view=MeView.as_view() , name=MeView.name),
     path("auth/change-password" , view=ChangePasswordView.as_view() , name=ChangePasswordView.name),
 

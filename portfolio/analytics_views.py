@@ -11,6 +11,7 @@ from rest_framework.views import APIView
 from django.conf import settings
 
 from .analytics import is_bot, is_owner, page_from_path, record_resume_view, record_visit
+from .account_lifecycle import sweep_daily
 from .permissions import is_site_owner
 from .models import PageView, PortfolioTrack, ResumeView, Visitor
 
@@ -37,6 +38,7 @@ class RecordVisitView(APIView):
         except ValueError:
             return Response({"visitor_id": ["A valid visitor id is required."]}, status=400)
 
+        sweep_daily()     # once a day, deletes accounts nobody has visited for a year
         path = request.data.get("path", "/")
         if not isinstance(path, str):
             return Response(status=204)

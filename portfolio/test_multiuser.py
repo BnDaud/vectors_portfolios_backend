@@ -1,17 +1,18 @@
 """Many accounts on one site: sign-up, the one-portfolio limit, and - above all - that no
 account can read-write, move into, download or count anything of another's."""
 import uuid
-from datetime import date
+from datetime import date, timedelta
 from unittest import mock
 
 from django.contrib.auth.models import User
 from django.core.cache import cache
 from django.test import override_settings
+from django.utils import timezone
 from rest_framework.test import APIClient, APITestCase
 from rest_framework.throttling import ScopedRateThrottle
 
 from . import resume_builder
-from .models import About, Goal, PageView, Portfolio, PortfolioTrack, Proficiency, Profile, Resume, ResumeView, School, Visitor
+from .models import About, DeletedAccount, Goal, PageView, Portfolio, PortfolioTrack, Proficiency, Profile, Resume, ResumeView, School, Visitor
 
 API = "/api_root"
 BROWSER = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
@@ -52,7 +53,9 @@ class SignupTests(APITestCase):
         self.assertTrue(profile.user.check_password(STRONG))
         self.assertFalse(profile.user.is_staff or profile.user.is_superuser)
         me = self.client.get(f"{API}/auth/me").json()
+        deletes_on = me.pop("deletes_on")
         self.assertEqual(me, {"authenticated": True, "username": "ada", "has_password": True, "google": False})
+        self.assertTrue(deletes_on.startswith(str(profile.user.date_joined.year + 1)), "a year after sign-up, with no visits yet")
 
     def test_usernames_are_web_address_safe_unique_and_not_reserved(self):
         account("owner")
@@ -499,3 +502,104 @@ class AccountsPanelTests(APITestCase):
         self.assertFalse(next(a for a in body["accounts"] if a["username"] == "ada")["protected"])
         self.assertEqual(self.as_(self.owner).delete(f"{API}/accounts/{admin.pk}").status_code, 403)
         self.assertTrue(User.objects.filter(pk=admin.pk).exists())
+
+
+@override_settings(SITE_OWNER_USERNAME="owner", PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])
+class InactiveAccountTests(APITestCase):
+    """No visitor for a year: the account is deleted, and the person is told so when they come back."""
+
+    def setUp(self):
+        cache.clear()
+
+    def aged(self, username, days, **kw):
+        profile = account(username, **kw)
+        User.objects.filter(pk=profile.user.pk).update(date_joined=timezone.now() - timedelta(days=days))
+        profile.user.refresh_from_db()
+        return profile
+
+    def visit(self, track, days_ago):
+        v = Visitor.objects.create(visitor_id=uuid.uuid4(), last_seen=timezone.now())
+        pv = PageView.objects.create(visitor=v, track=track, visit_number=1)
+        PageView.objects.filter(pk=pv.pk).update(created_at=timezone.now() - timedelta(days=days_ago))
+
+    def test_unvisited_for_a_year_is_deleted_recently_visited_is_kept(self):
+        from .account_lifecycle import sweep
+        stale = self.aged("stale", 400, limit=1); portfolio(stale, "S", "s")
+        visited = self.aged("visited", 400, limit=1); self.visit(portfolio(visited, "V", "v"), days_ago=30)
+        old_visit = self.aged("oldvisit", 800, limit=1); self.visit(portfolio(old_visit, "O", "o"), days_ago=370)
+        new = self.aged("newbie", 100, limit=1)
+        owner = self.aged("owner", 900); admin = User.objects.create_superuser("root", password=STRONG)
+        User.objects.filter(pk=admin.pk).update(date_joined=timezone.now() - timedelta(days=900))
+        self.assertEqual(sweep(), 2)
+        self.assertEqual(sorted(User.objects.values_list("username", flat=True)), ["newbie", "owner", "root", "visited"])
+        self.assertEqual(sorted(DeletedAccount.objects.values_list("username", "reason")), [("oldvisit", "inactive"), ("stale", "inactive")])
+        self.assertFalse(PortfolioTrack.objects.filter(slug__in=["s", "o"]).exists(), "their portfolios went too")
+
+    def test_the_owners_own_visits_do_not_keep_it_alive(self):
+        from .account_lifecycle import last_visited
+        ada = self.aged("ada", 400, limit=1); track = portfolio(ada, "A", "a")
+        client = APIClient(HTTP_HOST="localhost", HTTP_USER_AGENT="Mozilla/5.0 (X11) Chrome/120.0 Safari/537.36")
+        client.post(f"{API}/auth/login", {"username": "ada", "password": STRONG}, format="json")
+        client.post(f"{API}/analytics/visit", {"visitor_id": str(uuid.uuid4()), "path": "/u/ada/a"}, format="json")
+        self.assertIsNone(last_visited(ada.user))
+
+    def test_it_runs_at_most_once_a_day_from_ordinary_traffic(self):
+        self.aged("stale", 400, limit=1)
+        client = APIClient(HTTP_HOST="localhost", HTTP_USER_AGENT="Mozilla/5.0 (X11) Chrome/120.0 Safari/537.36")
+        with mock.patch("portfolio.account_lifecycle.sweep", wraps=__import__("portfolio.account_lifecycle", fromlist=["sweep"]).sweep) as run:
+            for _ in range(3):
+                client.post(f"{API}/analytics/visit", {"visitor_id": str(uuid.uuid4()), "path": "/"}, format="json")
+            self.assertEqual(run.call_count, 1)
+        self.assertFalse(User.objects.filter(username="stale").exists())
+
+    def test_coming_back_after_deletion_explains_what_happened(self):
+        from .account_lifecycle import sweep
+        self.aged("stale", 400, limit=1)
+        sweep()
+        res = APIClient(HTTP_HOST="localhost").post(f"{API}/auth/login", {"username": "stale", "password": STRONG}, format="json")
+        self.assertEqual(res.status_code, 410)
+        self.assertIn("deleted", res.json()["detail"]); self.assertIn("no one visited", res.json()["detail"])
+        status = APIClient(HTTP_HOST="localhost").get(f"{API}/auth/account-status?username=Stale").json()
+        self.assertEqual((status["deleted"], status["reason"]), (True, "inactive"))
+        self.assertEqual(APIClient(HTTP_HOST="localhost").get(f"{API}/auth/account-status?username=nobody").json(), {"deleted": False})
+        self.assertEqual(APIClient(HTTP_HOST="localhost").post(f"{API}/auth/login", {"username": "nobody", "password": "x"}, format="json").status_code, 401)
+
+    def test_the_name_can_be_used_again_and_the_note_goes(self):
+        from .account_lifecycle import sweep
+        self.aged("stale", 400, limit=1)
+        sweep()
+        res = APIClient(HTTP_HOST="localhost").post(f"{API}/auth/signup", {"username": "stale", "password": STRONG, "first_name": "S"}, format="json")
+        self.assertEqual(res.status_code, 201)
+        self.assertFalse(DeletedAccount.objects.exists())
+        self.assertEqual(APIClient(HTTP_HOST="localhost").get(f"{API}/auth/account-status?username=stale").json(), {"deleted": False})
+
+    @override_settings(GOOGLE_CLIENT_ID="test-client.apps.googleusercontent.com")
+    def test_a_deleted_google_account_is_told_and_can_start_again(self):
+        from .account_lifecycle import sweep
+        claims = {"iss": "https://accounts.google.com", "sub": "g-old", "email_verified": True, "given_name": "Gone"}
+        def google(**body):
+            with mock.patch("portfolio.auth_views.id_token.verify_oauth2_token", return_value=claims):
+                return APIClient(HTTP_HOST="localhost").post(f"{API}/auth/google", {"credential": "jwt", **body}, format="json")
+        first = google()
+        User.objects.filter(username=first.json()["username"]).update(date_joined=timezone.now() - timedelta(days=400))
+        sweep()
+        back = google()
+        self.assertEqual((back.status_code, back.json()["can_start_again"]), (410, True))
+        self.assertEqual(User.objects.count(), 0)
+        fresh = google(start_fresh=True)
+        self.assertEqual((fresh.status_code, fresh.json()["created"]), (201, True))
+        self.assertEqual(google().status_code, 200, "and from then on it just signs in")
+
+    def test_deleting_by_hand_leaves_the_note_too(self):
+        owner, ada = account("owner"), account("ada", limit=1)
+        client = APIClient(HTTP_HOST="localhost"); client.force_authenticate(user=owner.user)
+        self.assertEqual(client.delete(f"{API}/accounts/{ada.user.pk}").status_code, 204)
+        self.assertEqual(DeletedAccount.objects.get().reason, "removed")
+        self.assertIn("by the site owner", APIClient(HTTP_HOST="localhost").get(f"{API}/auth/account-status?username=ada").json()["message"])
+
+    def test_the_deletion_date_is_shown_to_the_account_and_never_for_the_owner(self):
+        ada = account("ada", limit=1); owner = account("owner")
+        a = APIClient(HTTP_HOST="localhost"); a.force_authenticate(user=ada.user)
+        o = APIClient(HTTP_HOST="localhost"); o.force_authenticate(user=owner.user)
+        self.assertIsNotNone(a.get(f"{API}/auth/me").json()["deletes_on"])
+        self.assertIsNone(o.get(f"{API}/auth/me").json()["deletes_on"])
